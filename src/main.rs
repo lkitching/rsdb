@@ -3,24 +3,25 @@ use std::fmt;
 
 use rustyline;
 
-use librsdb::process::{PIDParseError, Process, ProcessError, PID, StopReason};
+use librsdb::error::{Error};
+use librsdb::process::{PIDParseError, Process, PID, StopReason};
 
 #[derive(Debug)]
-enum Error {
+enum DebuggerError {
     InputError(String),
-    ProcessError(ProcessError),
+    InteropError(Error),
     InvalidCommand(String),
     UsageError
 }
 
-impl fmt::Display for Error {
+impl fmt::Display for DebuggerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InputError(ref msg) => {
                 write!(f, "{}", msg)
             },
-            Self::ProcessError(e) => {
-                write!(f, "{:?}", e)
+            Self::InteropError(e) => {
+                write!(f, "{}", e)
             },
             Self::InvalidCommand(command) => {
                 write!(f, "Invalid command: {}", command)
@@ -32,17 +33,17 @@ impl fmt::Display for Error {
     }
 }
 
-impl From<ProcessError> for Error {
-    fn from(e: ProcessError) -> Self { Error::ProcessError(e) }
+impl From<Error> for DebuggerError {
+    fn from(e: Error) -> Self { DebuggerError::InteropError(e) }
 }
 
-impl From<PIDParseError> for Error {
+impl From<PIDParseError> for DebuggerError {
     fn from(e: PIDParseError) -> Self {
         Self::InputError(format!("Invalid PID: {:?}", e))
     }
 }
 
-fn attach(args: &[String]) -> Result<Process, Error> {
+fn attach(args: &[String]) -> Result<Process, DebuggerError> {
     if args.len() == 3 && args[1].as_str() == "-p" {
         // passing PID
         let pid = args[2].parse::<PID>()?;
@@ -59,7 +60,7 @@ fn print_stop_reason(process: &Process, reason: &StopReason) {
     println!("Process {} {}", process.pid(), reason)
 }
 
-fn handle_command(process: &mut Process, line: &str) -> Result<(), Error> {
+fn handle_command(process: &mut Process, line: &str) -> Result<(), DebuggerError> {
     let mut args = line.split(' ');
     let command = args.next().expect("Expected at least one segment");
 
@@ -69,7 +70,7 @@ fn handle_command(process: &mut Process, line: &str) -> Result<(), Error> {
         print_stop_reason(process, &reason);
         Ok(())
     } else {
-        Err(Error::InvalidCommand(command.to_string()))
+        Err(DebuggerError::InvalidCommand(command.to_string()))
     }
 }
 
@@ -94,12 +95,12 @@ fn main_loop(mut proc: Process) -> ! {
     }
 }
 
-fn main() -> Result<(), Error> {
+fn main() -> Result<(), DebuggerError> {
     let args: Vec<String> = env::args().collect();
 
     if args.len() == 1 {
         eprintln!("No arguments given");
-        Err(Error::UsageError)
+        Err(DebuggerError::UsageError)
     } else {
         let proc = attach(args.as_slice())?;
         main_loop(proc);

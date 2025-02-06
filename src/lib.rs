@@ -1,2 +1,2 @@
 pub mod process;
-pub mod logging;
+pub mod error;

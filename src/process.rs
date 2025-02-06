@@ -7,7 +7,8 @@ use std::num::ParseIntError;
 
 use libc::{pid_t, fork, PTRACE_DETACH, WIFEXITED, WIFSIGNALED};
 use libc::{ptrace, PTRACE_TRACEME, PTRACE_ATTACH, PTRACE_CONT, c_void, c_char, c_int, execlp, waitpid, kill, SIGSTOP, SIGCONT, WEXITSTATUS, WTERMSIG, WIFSTOPPED, WSTOPSIG, strsignal};
-use crate::logging::{perror};
+
+use crate::error::{Error};
 use crate::process::PIDParseError::OutOfRange;
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -23,14 +24,6 @@ pub struct Process {
     pid: pid_t,
     state: ProcessState,
     terminate_on_end: bool
-}
-
-#[derive(Debug)]
-pub enum ProcessError {
-    ForkFailed,
-    PTraceError,
-    ExecFailed,
-    WaitFailed
 }
 
 pub struct StopReason {
@@ -111,25 +104,22 @@ impl fmt::Display for StopReason {
 }
 
 impl Process {
-    pub fn launch(path: &str) -> Result<Self, ProcessError> {
+    pub fn launch(path: &str) -> Result<Self, Error> {
         let pid = unsafe { fork() };
         if pid < 0 {
-            perror("fork failed");
-            return Err(ProcessError::ForkFailed)
+            return Err(Error::from_errno("fork failed"))
         }
 
         if pid == 0 {
             // in child process
             // execute debuggee
             if unsafe { ptrace(PTRACE_TRACEME, 0, ptr::null::<c_void>(), ptr::null::<c_void>()) } < 0 {
-                perror("Tracing failed");
-                return Err(ProcessError::PTraceError)
+                return Err(Error::from_errno("Tracing failed"));
             }
 
             let path_s = CString::new(path).expect("Invalid CString");
             if unsafe { execlp(path_s.as_ptr(), path_s.as_ptr(), ptr::null::<c_char>()) } < 0 {
-                perror("Exec failed");
-                return Err(ProcessError::ExecFailed)
+                return Err(Error::from_errno("exec failed"));
             }
 
             // if execlp succeeds then this line should not be reached
@@ -143,10 +133,9 @@ impl Process {
         }
     }
 
-    pub fn attach(pid: PID) -> Result<Self, ProcessError> {
+    pub fn attach(pid: PID) -> Result<Self, Error> {
         if unsafe { ptrace(PTRACE_ATTACH, pid.0, ptr::null::<c_void>(), ptr::null::<c_void>()) } < 0 {
-            perror("Could not attach");
-            return Err(ProcessError::PTraceError)
+            return Err(Error::from_errno("Could not attach"));
         }
 
         let mut proc = Self { pid: pid.0, state: ProcessState::Stopped, terminate_on_end: false };
@@ -154,21 +143,21 @@ impl Process {
         Ok(proc)
     }
 
-    pub fn resume(&mut self) -> Result<(), ProcessError> {
+    pub fn resume(&mut self) -> Result<(), Error> {
         if unsafe { ptrace(PTRACE_CONT, self.pid, ptr::null::<c_void>(), ptr::null::<c_void>()) } < 0 {
-            Err(ProcessError::PTraceError)
+            Err(Error::from_errno("Could not resume"))
         } else {
             self.state = ProcessState::Running;
             Ok(())
         }
     }
 
-    pub fn wait_on_signal(&mut self) -> Result<StopReason, ProcessError> {
+    pub fn wait_on_signal(&mut self) -> Result<StopReason, Error> {
         let wait_status = {
             let mut status = -1;
             let options = 0;
             if unsafe { waitpid(self.pid, &mut status, options) } < 0 {
-                return Err(ProcessError::WaitFailed);
+                return Err(Error::from_errno("waitpid failed"));
             }
             status
         };
