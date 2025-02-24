@@ -1,5 +1,6 @@
 use std::fmt::{Display, Formatter};
 use std::ffi::{CStr, CString};
+use std::io;
 
 use libc::{c_int, __errno_location};
 
@@ -35,7 +36,8 @@ pub fn strerror(errno: c_int) -> String {
 #[derive(Debug)]
 pub enum Error {
     Message(String),
-    ErrnoStr(&'static str, c_int)
+    ErrnoStr(&'static str, c_int),
+    IOError(io::Error)
 }
 
 impl Error {
@@ -48,6 +50,12 @@ impl Error {
     }
 }
 
+impl From<io::Error> for Error {
+    fn from(e: io::Error) -> Self {
+        Self::IOError(e)
+    }
+}
+
 impl Display for Error {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -56,6 +64,9 @@ impl Display for Error {
             },
             Self::ErrnoStr(prefix, errno) => {
                 write!(f, "{}: {}", prefix, strerror(*errno))
+            },
+            Self::IOError(e) => {
+                e.fmt(f)
             }
         }
     }

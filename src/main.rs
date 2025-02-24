@@ -51,7 +51,7 @@ fn attach(args: &[String]) -> Result<Process, DebuggerError> {
         Ok(proc)
     } else {
         let program_path = args[1].as_str();
-        let proc = Process::launch(program_path)?;
+        let proc = Process::launch(program_path, true)?;
         Ok(proc)
     }
 }

@@ -4,11 +4,13 @@ use std::ptr;
 use std::ffi::{CString, CStr};
 use std::fmt::Formatter;
 use std::num::ParseIntError;
+use std::io::{Read, Write};
 
-use libc::{pid_t, fork, PTRACE_DETACH, WIFEXITED, WIFSIGNALED};
+use libc::{pid_t, fork, PTRACE_DETACH, WIFEXITED, WIFSIGNALED, SIGKILL};
 use libc::{ptrace, PTRACE_TRACEME, PTRACE_ATTACH, PTRACE_CONT, c_void, c_char, c_int, execlp, waitpid, kill, SIGSTOP, SIGCONT, WEXITSTATUS, WTERMSIG, WIFSTOPPED, WSTOPSIG, strsignal};
 
-use crate::error::{Error};
+use crate::error::{self, Error};
+use crate::pipe::Pipe;
 use crate::process::PIDParseError::OutOfRange;
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -23,7 +25,8 @@ pub enum ProcessState {
 pub struct Process {
     pid: pid_t,
     state: ProcessState,
-    terminate_on_end: bool
+    terminate_on_end: bool,
+    is_attached: bool
 }
 
 pub struct StopReason {
@@ -103,8 +106,19 @@ impl fmt::Display for StopReason {
     }
 }
 
+fn exit_with_perror(channel: &mut Pipe, prefix: &str) -> ! {
+    // write error message to pipe
+    let msg = format!("{}: {}", prefix, error::strerror(error::errno()));
+
+    let _r = channel.write(msg.as_bytes());
+    std::process::exit(-1);
+}
+
 impl Process {
-    pub fn launch(path: &str) -> Result<Self, Error> {
+    pub fn launch(path: &str, debug: bool) -> Result<Self, Error> {
+        // create pipe to communicate with child process
+        let mut pipe = Pipe::create(true)?;
+
         let pid = unsafe { fork() };
         if pid < 0 {
             return Err(Error::from_errno("fork failed"))
@@ -112,23 +126,48 @@ impl Process {
 
         if pid == 0 {
             // in child process
-            // execute debuggee
-            if unsafe { ptrace(PTRACE_TRACEME, 0, ptr::null::<c_void>(), ptr::null::<c_void>()) } < 0 {
-                return Err(Error::from_errno("Tracing failed"));
+
+            //close read side of pipe
+            pipe.close_read();
+
+            // configure debugging if required
+            if debug {
+                if unsafe { ptrace(PTRACE_TRACEME, 0, ptr::null::<c_void>(), ptr::null::<c_void>()) } < 0 {
+                    exit_with_perror(&mut pipe, "Tracing failed");
+                }
             }
 
+            // execute debuggee
             let path_s = CString::new(path).expect("Invalid CString");
             if unsafe { execlp(path_s.as_ptr(), path_s.as_ptr(), ptr::null::<c_char>()) } < 0 {
-                return Err(Error::from_errno("exec failed"));
+                exit_with_perror(&mut pipe, "exec failed");
             }
 
             // if execlp succeeds then this line should not be reached
             unreachable!()
         } else {
             // in parent
-            // create handle for child proces and wait
-            let mut proc = Self { pid, state: ProcessState::Stopped, terminate_on_end: true };
-            proc.wait_on_signal()?;
+            pipe.close_write();
+
+            // wait for child process to write to pipe
+            // pipe is closed on exec so this will be empty if exec succeeds
+            // otherwise an error message should be written by the child
+            let mut msg = String::new();
+            let bytes_written = pipe.read_to_string(&mut msg)?;
+
+            if bytes_written > 0 {
+                // wait for child to exit
+                unsafe { waitpid(pid, ptr::null_mut(), 0); }
+                return Err(Error::from_message(msg));
+            }
+
+            // create handle for child proces and wait if debugging
+            let mut proc = Self { pid, state: ProcessState::Stopped, terminate_on_end: true, is_attached: debug };
+
+            if debug {
+                proc.wait_on_signal()?;
+            }
+
             Ok(proc)
         }
     }
@@ -138,7 +177,7 @@ impl Process {
             return Err(Error::from_errno("Could not attach"));
         }
 
-        let mut proc = Self { pid: pid.0, state: ProcessState::Stopped, terminate_on_end: false };
+        let mut proc = Self { pid: pid.0, state: ProcessState::Stopped, terminate_on_end: false, is_attached: true };
         proc.wait_on_signal()?;
         Ok(proc)
     }
@@ -189,22 +228,108 @@ impl Drop for Process {
                 }
             }
 
-            // detach from process
-            unsafe {
-                // NOTE: errors ignored
-                ptrace(PTRACE_DETACH, self.pid, ptr::null::<c_void>(), ptr::null::<c_void>());
-                kill(self.pid, SIGCONT);
+            // detach from process if required
+            if self.is_attached {
+                unsafe {
+                    // NOTE: errors ignored
+                    ptrace(PTRACE_DETACH, self.pid, ptr::null::<c_void>(), ptr::null::<c_void>());
+                    kill(self.pid, SIGCONT);
+                }
             }
+
 
             // kill process if we spawned it initially
             if self.terminate_on_end {
                 unsafe {
-                    kill(self.pid, SIGCONT);
+                    kill(self.pid, SIGKILL);
 
                     let mut status = -1;
                     waitpid(self.pid, &mut status, 0);
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::io::{self, BufReader, BufRead};
+    use std::fs::File;
+    use std::path::{PathBuf};
+    use libc::{ESRCH};
+    use super::*;
+    use crate::error::{errno};
+
+    fn process_exists(pid: pid_t) -> bool {
+        let ret = unsafe { kill(pid, 0) };
+        ret != -1 && errno() != ESRCH
+    }
+
+    fn get_process_status(pid: pid_t) -> io::Result<char> {
+        let mut path = PathBuf::new();
+        path.push("/proc");
+        path.push(pid.to_string());
+        path.push("stat");
+
+        let f = File::open(path)?;
+        let mut reader = BufReader::new(f);
+        let mut line = String::new();
+        reader.read_line(&mut line)?;
+
+        let proc_name_end = line.rfind(')').expect("Failed to find process name");
+
+        // status should follow a space after the closing parenthesis around the process name
+        // NOTE: rfind returns a byte index
+        let status_indicator_index = proc_name_end + 2;
+        Ok(line.as_bytes()[status_indicator_index] as char)
+    }
+
+    #[test]
+    fn process_launch_succeeds() {
+        let r = Process::launch("yes", true).expect("Failed to start process");
+        assert!(process_exists(r.pid()), "Process does not exist");
+    }
+
+    #[test]
+    fn process_launch_no_such_program() {
+        let r = Process::launch("you_do_not_have_to_be_good", true);
+        assert!(r.is_err(), "Expected error launching non-existant process");
+    }
+
+    #[test]
+    fn process_attach_success() {
+        let target = Process::launch("target/debug/run_endlessly", false).expect("Failed to launch process");
+        let _proc = Process::attach(PID(target.pid())).expect("Failed to attach to process");
+        let status = get_process_status(target.pid()).expect("Failed to read process status");
+        assert_eq!('t', status, "Unexpected process status");
+    }
+
+    #[test]
+    fn process_resume_launched_success() {
+        let mut proc = Process::launch("target/debug/run_endlessly", true).expect("Failed to launch process");
+        proc.resume().expect("Failed to resume");
+
+        let status = get_process_status(proc.pid()).expect("Failed to get process status");
+        assert!(status == 'R' || status == 'S', "Unexpected process status after resume");
+    }
+
+    #[test]
+    fn process_resume_attached_success() {
+        let target = Process::launch("target/debug/run_endlessly", false).expect("Failed to launch process");
+
+        let mut proc = Process::attach(PID(target.pid())).expect("Failed to attach to process");
+        proc.resume().expect("Failed to resume");
+
+        let status = get_process_status(proc.pid()).expect("Failed to get process status");
+        assert!(status == 'R' || status == 'S');
+    }
+
+    #[test]
+    fn process_resume_already_terminated() {
+        let mut proc = Process::launch("target/debug/end_immediately", true).expect("Failed to launch process");
+        proc.resume().expect("Failed to resume");
+        let _reason = proc.wait_on_signal().expect("Failed to wait");
+        let result = proc.resume();
+        assert!(result.is_err(), "Expected error waiting on terminated process");
     }
 }

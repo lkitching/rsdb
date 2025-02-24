@@ -14,3 +14,11 @@ path = "src/lib.rs"
 [[bin]]
 name = "rsdb"
 path = "src/main.rs"
+
+[[bin]]
+name = "run_endlessly"
+path = "src/support/run_endlessly.rs"
+
+[[bin]]
+name = "end_immediately"
+path = "src/support/end_immediately.rs"
