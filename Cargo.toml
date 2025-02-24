@@ -3,9 +3,13 @@ name = "rsdb"
 version = "0.1.0"
 edition = "2021"
 
+# run rsdb by default with 'cargo run'
+default-run = "rsdb"
+
 [dependencies]
 libc = "0.2"
 rustyline = "15.0"
+registers-macro = { path = "./registers-macro" }
 
 [lib]
 name = "librsdb"

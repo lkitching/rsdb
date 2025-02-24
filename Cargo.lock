@@ -127,10 +127,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "registers-macro"
+version = "0.1.0"
+
+[[package]]
 name = "rsdb"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "registers-macro",
  "rustyline",
 ]
 
