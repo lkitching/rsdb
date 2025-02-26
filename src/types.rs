@@ -28,23 +28,6 @@ impl Byte128 {
     }
 }
 
-// TODO: use nightly compiler and https://doc.rust-lang.org/nightly/std/primitive.f128.html?
-#[allow(non_camel_case_types)]
-#[derive(Copy, Clone, Debug)]
-pub struct f128 {
-    bytes: [u8; 16]
-}
-
-impl f128 {
-    pub fn from_le_bytes(bytes: [u8; 16]) -> Self {
-        Self { bytes }
-    }
-
-    pub fn to_le_bytes(self) -> [u8; 16] {
-        self.bytes
-    }
-}
-
 #[derive(Copy, Clone, Debug)]
 pub enum Value {
     U8(u8),
