@@ -12,6 +12,7 @@ use libc::{ptrace, PTRACE_TRACEME, PTRACE_ATTACH, PTRACE_CONT, c_void, c_char, c
 use crate::error::{self, Error};
 use crate::pipe::Pipe;
 use crate::process::PIDParseError::OutOfRange;
+use crate::register::{Registers};
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum ProcessState {
@@ -21,12 +22,13 @@ pub enum ProcessState {
     Terminated
 }
 
-#[derive(Debug)]
+//#[derive(Debug)]
 pub struct Process {
     pid: pid_t,
     state: ProcessState,
     terminate_on_end: bool,
-    is_attached: bool
+    is_attached: bool,
+    registers: Registers
 }
 
 pub struct StopReason {
@@ -162,7 +164,7 @@ impl Process {
             }
 
             // create handle for child proces and wait if debugging
-            let mut proc = Self { pid, state: ProcessState::Stopped, terminate_on_end: true, is_attached: debug };
+            let mut proc = Self { pid, state: ProcessState::Stopped, terminate_on_end: true, is_attached: debug, registers: Registers::new(pid) };
 
             if debug {
                 proc.wait_on_signal()?;
@@ -177,7 +179,7 @@ impl Process {
             return Err(Error::from_errno("Could not attach"));
         }
 
-        let mut proc = Self { pid: pid.0, state: ProcessState::Stopped, terminate_on_end: false, is_attached: true };
+        let mut proc = Self { pid: pid.0, state: ProcessState::Stopped, terminate_on_end: false, is_attached: true, registers: Registers::new(pid.0) };
         proc.wait_on_signal()?;
         Ok(proc)
     }
@@ -202,7 +204,20 @@ impl Process {
         };
         let stop_reason = StopReason::from_status(wait_status);
         self.state = stop_reason.reason;
+
+        if self.is_attached && self.state == ProcessState::Stopped {
+            self.read_all_registers()?;
+        }
+
         Ok(stop_reason)
+    }
+
+    fn read_all_registers(&mut self) -> Result<(), Error> {
+        self.registers.read_all()
+    }
+
+    pub fn write_user_area(&mut self, offset: usize, word: u64) -> Result<(), Error> {
+        self.registers.write_user_area(offset, word)
     }
 
     pub fn pid(&self) -> pid_t {
@@ -212,6 +227,8 @@ impl Process {
     pub fn state(&self) -> ProcessState {
         self.state
     }
+
+    pub fn registers(&self) -> &Registers { &self.registers }
 }
 
 impl Drop for Process {

@@ -98,15 +98,11 @@ fn main_loop(mut proc: Process) -> ! {
 fn main() -> Result<(), DebuggerError> {
     let args: Vec<String> = env::args().collect();
 
-    for reg in librsdb::register::REGISTER_INFOS.iter() {
-        println!("{:?}", reg);
+    if args.len() == 1 {
+        eprintln!("No arguments given");
+        Err(DebuggerError::UsageError)
+    } else {
+        let proc = attach(args.as_slice())?;
+        main_loop(proc);
     }
-    Ok(())
-    // if args.len() == 1 {
-    //     eprintln!("No arguments given");
-    //     Err(DebuggerError::UsageError)
-    // } else {
-    //     let proc = attach(args.as_slice())?;
-    //     main_loop(proc);
-    // }
 }
