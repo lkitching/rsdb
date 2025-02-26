@@ -1,7 +1,7 @@
 use core::mem::{self, offset_of, transmute};
 use std::ffi::c_void;
 use std::ptr;
-use libc::{user, user_fpregs_struct, user_regs_struct, pid_t, PTRACE_GETREGS, PTRACE_GETFPREGS, ptrace, size_t, PTRACE_POKEUSER, PTRACE_PEEKUSER, c_ulonglong};
+use libc::{user, user_fpregs_struct, user_regs_struct, pid_t, PTRACE_GETREGS, PTRACE_GETFPREGS, ptrace, size_t, PTRACE_POKEUSER, PTRACE_PEEKUSER, c_ulonglong, PTRACE_SETFPREGS, PTRACE_SETREGS};
 
 use registers_macro::{registers};
 use crate::error::{errno, set_errno, Error};
@@ -11,7 +11,7 @@ pub enum RegisterFormat {
     UInt, DoubleFloat, LongDouble, Vector
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum RegisterType {
     GeneralPurpose,
     GeneralPurposeSub,
@@ -398,6 +398,20 @@ impl Registers {
         }
     }
 
+    fn write_fprs(&mut self) -> Result<(), Error> {
+        if unsafe { ptrace(PTRACE_SETFPREGS, self.pid, ptr::null::<c_void>(), &self.data.i387 as *const user_fpregs_struct as *const c_void) } < 0 {
+            return Err(Error::from_errno("Could not write floating point registers"));
+        }
+        Ok(())
+    }
+
+    fn write_gprs(&mut self) -> Result<(), Error> {
+        if unsafe { ptrace(PTRACE_SETREGS, self.pid, ptr::null::<c_void>(), &self.data.regs as *const user_regs_struct as *const c_void) } < 0 {
+            return Err(Error::from_errno("Could not write general purpose registers"));
+        }
+        Ok(())
+    }
+
     pub fn read_by_id_as<T: TryFrom<Value>>(&self, id: RegisterId) -> T {
         unimplemented!()
     }
@@ -421,14 +435,19 @@ impl Registers {
         }
 
         // save register state
-        // NOTE: write_user_area is a member of Process in sdb!
-        // TODO: handle types smaller or larger than 1 word!
-        // offset within user area must be aligned on an 8-byte boundary
-        // calculate the aligned offset within the user struct and read the word to save from there
-        let aligned_offset = info.offset & 0b111;
-        let aligned_p = unsafe { user_start_p.add(aligned_offset) };
-        let word = unsafe { u64::from_bytes_raw(aligned_p as *const u8) };
-        self.write_user_area(info.offset, word)
+        if info.ty == RegisterType::FloatingPoint {
+            // register is a floating point register, save all registers at once
+            self.write_fprs()
+        } else {
+            // poke data into user area directly for non floating-point registers
+            // TODO: handle types smaller or larger than 1 word!
+            // offset within user area must be aligned on an 8-byte boundary
+            // calculate the aligned offset within the user struct and read the word to save from there
+            let aligned_offset = info.offset & 0b111;
+            let aligned_p = unsafe { user_start_p.add(aligned_offset) };
+            let word = unsafe { u64::from_bytes_raw(aligned_p as *const u8) };
+            self.write_user_area(info.offset, word)
+        }
     }
 
     pub fn write_by_id<T: TryInto<Value>>(&mut self, id: RegisterId, v: T) {
