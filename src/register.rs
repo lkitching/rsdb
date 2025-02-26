@@ -408,10 +408,8 @@ impl Registers {
         assert_eq!(info.size, bytes.len(), "mismatched register and value sizes");
 
         let user_p = &mut self.data as *mut user;
-        let reg_data_p = unsafe {
-            let user_start_p: *mut u8 = transmute(user_p);
-            user_start_p.add(info.offset)
-        };
+        let user_start_p: *mut u8 = unsafe { transmute(user_p) };
+        let reg_data_p = unsafe { user_start_p.add(info.offset) };
 
         // write bytes at register offset in user data
         let mut p = reg_data_p;
@@ -425,10 +423,11 @@ impl Registers {
         // save register state
         // NOTE: write_user_area is a member of Process in sdb!
         // TODO: handle types smaller or larger than 1 word!
-        let word = {
-            let a: [u8; 8] = bytes.try_into().expect("Unsupported size");
-            u64::from_le_bytes(a)
-        };
+        // offset within user area must be aligned on an 8-byte boundary
+        // calculate the aligned offset within the user struct and read the word to save from there
+        let aligned_offset = info.offset & 0b111;
+        let aligned_p = unsafe { user_start_p.add(aligned_offset) };
+        let word = unsafe { u64::from_bytes_raw(aligned_p as *const u8) };
         self.write_user_area(info.offset, word)
     }
 
