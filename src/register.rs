@@ -135,6 +135,10 @@ pub fn debug_register_infos() -> impl Iterator<Item=&'static RegisterInfo> {
     REGISTER_INFOS.iter().skip_while(|info| info.id != RegisterId::dr0).take(8)
 }
 
+fn widen<T: TryWiden>(register_info: &RegisterInfo, v: T) -> Result<Value, RegisterSizeError> {
+    v.try_widen(register_info.size)
+}
+
 pub struct Registers {
     pid: pid_t,
     data: libc::user
@@ -263,10 +267,13 @@ impl Registers {
     }
 
     pub fn write(&mut self, info: &RegisterInfo, value: Value) -> Result<(), Error> {
-        let bytes = value.to_bytes();
+        // widen data type to match register size
+        let wide = widen(info, value).expect("Register write called with mismatched register and value sizes");
+        let bytes = wide.to_bytes();
 
         assert_eq!(info.size, bytes.len(), "mismatched register and value sizes");
 
+        // find offset of the register data within the user struct
         let user_p = &mut self.data as *mut user;
         let user_start_p: *mut u8 = unsafe { transmute(user_p) };
         let reg_data_p = unsafe { user_start_p.add(info.offset) };
@@ -285,8 +292,11 @@ impl Registers {
             // register is a floating point register, save all registers at once
             self.write_fprs()
         } else {
+            // NOTE: floating point registers are the ONLY registers wider than 8 bytes
+            // so we should never need to write more than 1 word here
+            assert!(info.size <= 8, "Unexpectedly large non floating-point register {}", info.name);
+
             // poke data into user area directly for non floating-point registers
-            // TODO: handle types smaller or larger than 1 word!
             // offset within user area must be aligned on an 8-byte boundary
             // calculate the aligned offset within the user struct and read the word to save from there
             let aligned_offset = info.offset & 0b111;
