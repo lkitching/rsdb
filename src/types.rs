@@ -114,12 +114,12 @@ pub unsafe trait FromBytesRaw {
 
 macro_rules! derive_from_bytes_raw {
     ($t:ty, $len:expr) => {
-        unsafe impl FromBytesRaw for ($t) {
+        unsafe impl FromBytesRaw for $t {
             unsafe fn from_bytes_raw(bytes: *const u8) -> Self {
-                let mut a: [u8; ($len)] = [0; ($len)];
+                let mut a: [u8; $len] = [0; $len];
                 let mut b = bytes;
 
-                for i in 0..($len) {
+                for i in 0..$len {
                     unsafe { a[i] = *b; }
                     b = b.add(1)
                 }
@@ -151,7 +151,7 @@ pub trait ToBytes : Copy {
 
 macro_rules! derive_to_bytes {
     ($t:ty) => {
-        impl ToBytes for ($t) {
+        impl ToBytes for $t {
             fn to_bytes(self) -> Vec<u8> {
                 let a = Self::to_le_bytes(self);
                 Vec::from(a)

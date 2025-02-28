@@ -484,15 +484,6 @@ impl AsTokens for SizeofField {
     }
 }
 
-fn register_id(register_name: &str) -> TokenStream {
-    TokenStream::from_iter(vec![
-        ident("RegisterId"),
-        TokenTree::Punct(Punct::new(':', Spacing::Joint)),
-        TokenTree::Punct(Punct::new(':', Spacing::Alone)),
-        ident(register_name)
-    ])
-}
-
 fn ident(id: &str) -> TokenTree {
     TokenTree::Ident(Ident::new(id, Span::call_site()))
 }
