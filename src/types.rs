@@ -71,10 +71,25 @@ pub enum Value {
     Byte128(Byte128)
 }
 
+#[derive(Copy, Clone, Debug)]
+pub struct RegisterValueError;
+
 macro_rules! derive_value_from {
     ($ty:ty, $constructor:ident) => {
         impl From<$ty> for Value {
             fn from(value: $ty) -> Self { Self::$constructor(value) }
+        }
+
+        impl TryFrom<Value> for $ty {
+            type Error = RegisterValueError;
+            fn try_from(value: Value) -> Result<Self, Self::Error> {
+                match value {
+                    Value::$constructor(v) => {
+                        Ok(v)
+                    },
+                    _ => Err(RegisterValueError)
+                }
+            }
         }
     };
 }

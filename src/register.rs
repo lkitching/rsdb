@@ -262,8 +262,10 @@ impl Registers {
         Ok(())
     }
 
-    pub fn read_by_id_as<T: TryFrom<Value>>(&self, id: RegisterId) -> T {
-        unimplemented!()
+    pub fn read_by_id_as<T: TryFrom<Value,Error=RegisterValueError>>(&self, id: RegisterId) -> T {
+        let reg_info = register_info_by_id(id);
+        let reg_value = self.read(reg_info);
+        reg_value.try_into().expect(&format!("Invalid target type for register {}", reg_info.name))
     }
 
     pub fn write(&mut self, info: &RegisterInfo, value: Value) -> Result<(), Error> {
@@ -306,7 +308,8 @@ impl Registers {
         }
     }
 
-    pub fn write_by_id<T: TryInto<Value>>(&mut self, id: RegisterId, v: T) {
-        unimplemented!()
+    pub fn write_by_id<T: Into<Value>>(&mut self, id: RegisterId, v: T) -> Result<(), Error> {
+        let reg_info = register_info_by_id(id);
+        self.write(reg_info, v.into())
     }
 }
