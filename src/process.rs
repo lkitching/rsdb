@@ -5,8 +5,9 @@ use std::ffi::{CString, CStr};
 use std::fmt::Formatter;
 use std::num::ParseIntError;
 use std::io::{Read, Write};
+use std::os::fd::{RawFd};
 
-use libc::{pid_t, fork, PTRACE_DETACH, WIFEXITED, WIFSIGNALED, SIGKILL};
+use libc::{pid_t, fork, PTRACE_DETACH, WIFEXITED, WIFSIGNALED, SIGKILL, STDOUT_FILENO, dup2};
 use libc::{ptrace, PTRACE_TRACEME, PTRACE_ATTACH, PTRACE_CONT, c_void, c_char, c_int, execlp, waitpid, kill, SIGSTOP, SIGCONT, WEXITSTATUS, WTERMSIG, WIFSTOPPED, WSTOPSIG, strsignal};
 
 use crate::error::{self, Error};
@@ -116,8 +117,14 @@ fn exit_with_perror(channel: &mut Pipe, prefix: &str) -> ! {
     std::process::exit(-1);
 }
 
+#[derive(Copy, Clone, Debug)]
+pub enum StdoutReplacement {
+    None,
+    Fd(RawFd)
+}
+
 impl Process {
-    pub fn launch(path: &str, debug: bool) -> Result<Self, Error> {
+    pub fn launch(path: &str, debug: bool, stdout_replacement: StdoutReplacement) -> Result<Self, Error> {
         // create pipe to communicate with child process
         let mut pipe = Pipe::create(true)?;
 
@@ -131,6 +138,13 @@ impl Process {
 
             //close read side of pipe
             pipe.close_read();
+
+            // replace stdout with given file hande if specified
+            if let StdoutReplacement::Fd(fd) = stdout_replacement {
+                if unsafe { dup2(fd, STDOUT_FILENO) } < 0 {
+                    exit_with_perror(&mut pipe, "stdout replacement failed");
+                }
+            }
 
             // configure debugging if required
             if debug {
@@ -303,19 +317,19 @@ mod test {
 
     #[test]
     fn process_launch_succeeds() {
-        let r = Process::launch("yes", true).expect("Failed to start process");
+        let r = Process::launch("yes", true, StdoutReplacement::None).expect("Failed to start process");
         assert!(process_exists(r.pid()), "Process does not exist");
     }
 
     #[test]
     fn process_launch_no_such_program() {
-        let r = Process::launch("you_do_not_have_to_be_good", true);
+        let r = Process::launch("you_do_not_have_to_be_good", true, StdoutReplacement::None);
         assert!(r.is_err(), "Expected error launching non-existant process");
     }
 
     #[test]
     fn process_attach_success() {
-        let target = Process::launch("target/debug/run_endlessly", false).expect("Failed to launch process");
+        let target = Process::launch("target/debug/run_endlessly", false, StdoutReplacement::None).expect("Failed to launch process");
         let _proc = Process::attach(PID(target.pid())).expect("Failed to attach to process");
         let status = get_process_status(target.pid()).expect("Failed to read process status");
         assert_eq!('t', status, "Unexpected process status");
@@ -323,7 +337,7 @@ mod test {
 
     #[test]
     fn process_resume_launched_success() {
-        let mut proc = Process::launch("target/debug/run_endlessly", true).expect("Failed to launch process");
+        let mut proc = Process::launch("target/debug/run_endlessly", true, StdoutReplacement::None).expect("Failed to launch process");
         proc.resume().expect("Failed to resume");
 
         let status = get_process_status(proc.pid()).expect("Failed to get process status");
@@ -332,7 +346,7 @@ mod test {
 
     #[test]
     fn process_resume_attached_success() {
-        let target = Process::launch("target/debug/run_endlessly", false).expect("Failed to launch process");
+        let target = Process::launch("target/debug/run_endlessly", false, StdoutReplacement::None).expect("Failed to launch process");
 
         let mut proc = Process::attach(PID(target.pid())).expect("Failed to attach to process");
         proc.resume().expect("Failed to resume");
@@ -343,7 +357,7 @@ mod test {
 
     #[test]
     fn process_resume_already_terminated() {
-        let mut proc = Process::launch("target/debug/end_immediately", true).expect("Failed to launch process");
+        let mut proc = Process::launch("target/debug/end_immediately", true, StdoutReplacement::None).expect("Failed to launch process");
         proc.resume().expect("Failed to resume");
         let _reason = proc.wait_on_signal().expect("Failed to wait");
         let result = proc.resume();

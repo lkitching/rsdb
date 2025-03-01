@@ -4,7 +4,7 @@ use std::fmt;
 use rustyline;
 
 use librsdb::error::{Error};
-use librsdb::process::{PIDParseError, Process, PID, StopReason};
+use librsdb::process::{PIDParseError, Process, PID, StopReason, StdoutReplacement};
 
 #[derive(Debug)]
 enum DebuggerError {
@@ -51,7 +51,7 @@ fn attach(args: &[String]) -> Result<Process, DebuggerError> {
         Ok(proc)
     } else {
         let program_path = args[1].as_str();
-        let proc = Process::launch(program_path, true)?;
+        let proc = Process::launch(program_path, true, StdoutReplacement::None)?;
         Ok(proc)
     }
 }
