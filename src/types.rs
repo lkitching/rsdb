@@ -1,4 +1,4 @@
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct Byte64 {
     bytes: [u8; 8]
 }
@@ -13,7 +13,7 @@ impl Byte64 {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct Byte128 {
     bytes: [u8; 16]
 }
@@ -297,7 +297,11 @@ impl TryWiden for f32 {
         match size {
             4 => Ok(self.into()),
             8 => Ok((self as f64).into()),
-            16 => Ok((self as f128).into()),
+            16 => {
+                // NOTE: should only happen for vector float registers!
+                // copy bits to byte128
+                Ok(Byte128::from(self).into())
+            }
             _ => Err(RegisterSizeError)
         }
     }
@@ -307,7 +311,11 @@ impl TryWiden for f64 {
     fn try_widen(self, size: usize) -> Result<Value, RegisterSizeError> {
         match size {
             8 => Ok(self.into()),
-            16 => Ok((self as f128).into()),
+            16 => {
+                // NOTE: should only happen for vector float registers
+                // copy bits to byte128
+                Ok(Byte128::from(self).into())
+            }
             _ => Err(RegisterSizeError)
         }
     }
@@ -316,7 +324,10 @@ impl TryWiden for f64 {
 impl TryWiden for f128 {
     fn try_widen(self, size: usize) -> Result<Value, RegisterSizeError> {
         match size {
-            16 => Ok(self.into()),
+            16 => {
+                // should never happen?
+                Ok(self.into())
+            }
             _ => Err(RegisterSizeError)
         }
     }

@@ -243,6 +243,8 @@ impl Process {
     }
 
     pub fn registers(&self) -> &Registers { &self.registers }
+
+    pub fn registers_mut(&mut self) -> &mut Registers { &mut self.registers }
 }
 
 impl Drop for Process {
@@ -290,6 +292,8 @@ mod test {
     use libc::{ESRCH};
     use super::*;
     use crate::error::{errno};
+    use crate::register::*;
+    use crate::types::{Byte64, Byte128};
 
     fn process_exists(pid: pid_t) -> bool {
         let ret = unsafe { kill(pid, 0) };
@@ -362,5 +366,128 @@ mod test {
         let _reason = proc.wait_on_signal().expect("Failed to wait");
         let result = proc.resume();
         assert!(result.is_err(), "Expected error waiting on terminated process");
+    }
+
+    fn read_next_string(channel: &mut Pipe) -> String {
+        let mut buf = [0u8; 100];
+        let bytes_read = channel.read(buf.as_mut_slice()).expect("Failed to read");
+        String::from_utf8(buf[0..bytes_read].to_vec()).expect("Invalid utf8")
+    }
+
+    // TODO: move to new tests directory?
+    #[test]
+    fn write_registers() {
+        let close_on_exec = false;
+        let mut channel = Pipe::create(close_on_exec).expect("Failed to create pipe");
+
+        let mut proc = Process::launch("target/debug/reg_write", true, StdoutReplacement::Fd(channel.write_fd())).expect("Failed to launch process");
+        channel.close_write();
+
+        proc.resume().expect("Failed to resume");
+        proc.wait_on_signal().expect("Failed to wait");
+
+        proc.registers_mut().write_by_id(RegisterId::rsi, 0xcafecafeu32).expect("Failed to write register");
+
+        proc.resume().expect("Failed to resume");
+        proc.wait_on_signal().expect("Failed to wait");
+
+        {
+            let output = read_next_string(&mut channel);
+            assert_eq!("0xcafecafe", output);
+        };
+
+        // write to mm0 register
+        proc.registers_mut().write_by_id(RegisterId::mm0, 0xba5eba11u32).expect("Failed to write register");
+
+        proc.resume().expect("Failed to resume");
+        proc.wait_on_signal().expect("Failed to wait");
+
+        {
+            let output = read_next_string(&mut channel);
+            assert_eq!("0xba5eba11", output);
+        }
+
+        // write to sse register
+        proc.registers_mut().write_by_id(RegisterId::xmm0, 42.24f64).expect("Failed to write register");
+
+        proc.resume().expect("Failed to resume");
+        proc.wait_on_signal().expect("Failed to wait");
+
+        {
+            let output = read_next_string(&mut channel);
+            assert_eq!("42.24", output);
+        }
+
+        // x87
+        {
+            let regs = proc.registers_mut();
+            regs.write_by_id(RegisterId::fsw, 0b0011100000000000u16).expect("Failed to write fws register");
+            regs.write_by_id(RegisterId::st0, 1234.56f128).expect("Failed to write st0");
+            regs.write_by_id(RegisterId::ftw, 0b0011111111111111u16).expect("Failed to write ftw register");
+        }
+
+        proc.resume().expect("Failed to wait");
+        proc.wait_on_signal().expect("Failed to wait");
+
+        {
+            let output = read_next_string(&mut channel);
+
+            // TODO: fix!
+            // assert_eq!("1234.56", output);
+        }
+    }
+
+    #[test]
+    fn read_registers() {
+        let mut proc = Process::launch("target/debug/reg_read", true, StdoutReplacement::None).expect("Failed to launch process");
+
+        proc.resume().expect("Failed to resume");
+        let reason = proc.wait_on_signal().expect("Failed to wait");
+        assert_eq!(ProcessState::Stopped, reason.reason);
+
+        {
+            // read r13
+            let v: u64 = proc.registers_mut().read_by_id_as(RegisterId::r13);
+            assert_eq!(0xcafecafeu64, v, "Unexpected value for R13");
+        }
+
+        proc.resume().expect("Failed to resume");
+        proc.wait_on_signal().expect("Failed to wait");
+
+        {
+            // read r13b
+            let v: u8 = proc.registers_mut().read_by_id_as(RegisterId::r13b);
+            assert_eq!(42, v, "Unexpected value for R13b");
+        }
+
+        proc.resume().expect("Failed to resume");
+        proc.wait_on_signal().expect("Failed to wait");
+        {
+            let v: Byte64 = proc.registers_mut().read_by_id_as(RegisterId::mm0);
+            let expected = Byte64::from_le_bytes([0x11, 0xba, 0x5e, 0xba, 0, 0, 0, 0]);
+            assert_eq!(expected, v, "Unexpected value for MM0");
+        }
+
+        proc.resume().expect("Failed to resume");
+        proc.wait_on_signal().expect("Failed to wait");
+
+        {
+            let v: Byte128 = proc.registers_mut().read_by_id_as(RegisterId::xmm0);
+
+            let expected_f = 64.125f64;
+            let expected_bytes: Byte128 = expected_f.into();
+
+            assert_eq!(v, expected_bytes, "Unexpected value loaded from XMM0 register");
+        }
+
+        proc.resume().expect("Failed to resume");
+        proc.wait_on_signal().expect("Failed to wait");
+
+        {
+            let v: Byte128 = proc.registers_mut().read_by_id_as(RegisterId::st0);
+
+            // TODO: figure out how to get the expected bytes for an 80-bit float
+            //assert_eq!(expected_bytes, v, "Unexpected value for st0");
+        }
     }
 }

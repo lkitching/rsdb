@@ -153,11 +153,11 @@ impl Registers {
     }
 
     pub fn read_all(&mut self) -> Result<(), Error> {
-        if unsafe { ptrace(PTRACE_GETREGS, self.pid, ptr::null::<c_void>(), &self.data.regs as *const user_regs_struct as *const c_void) } < 0 {
+        if unsafe { ptrace(PTRACE_GETREGS, self.pid, ptr::null::<c_void>(), &mut self.data.regs as *mut user_regs_struct as *mut c_void) } < 0 {
             return Err(Error::from_errno("Could not read GPR registers"));
         }
 
-        if unsafe { ptrace(PTRACE_GETFPREGS, self.pid, ptr::null::<c_void>(), &self.data.i387 as *const user_fpregs_struct as *const c_void) } < 0 {
+        if unsafe { ptrace(PTRACE_GETFPREGS, self.pid, ptr::null::<c_void>(), &mut self.data.i387 as *mut user_fpregs_struct as *mut c_void) } < 0 {
             return Err(Error::from_errno("Could not read FPR registers"));
         }
 
@@ -180,7 +180,7 @@ impl Registers {
     /// Writes the given word to the user area for this process
     /// offset must be word-aligned i.e. on an 8-byte boundary
     pub fn write_user_area(&mut self, offset: size_t, word: u64) -> Result<(), Error> {
-        if unsafe { ptrace(PTRACE_POKEUSER, self.pid, &offset as *const size_t as *const c_void, &word as *const u64 as *const c_void) } < 0 {
+        if unsafe { ptrace(PTRACE_POKEUSER, self.pid, offset as *const size_t as *const c_void, word as *const u64 as *const c_void) } < 0 {
             return Err(Error::from_errno("Could not write to user area"));
         }
         Ok(())
@@ -226,8 +226,14 @@ impl Registers {
             },
             RegisterFormat::LongDouble => {
                 assert_eq!(info.size, 16, "Unexpected size for long double register");
-                let f = unsafe { f128::from_bytes_raw(reg_data_p) };
-                Value::F128(f)
+                // NOTE: book reads directly into a long double here
+                // long double floating point registers only use the lower 80 bits though(?)
+                // c++ behaviour might be different so just read the bytes directly here and
+                // convert at a higher level
+                //let f = unsafe { f128::from_bytes_raw(reg_data_p) };
+                // Value::F128(f)
+                let bytes = unsafe { Byte128::from_bytes_raw(reg_data_p) };
+                Value::Byte128(bytes)
             },
             RegisterFormat::Vector => {
                 match info.size {
@@ -301,10 +307,11 @@ impl Registers {
             // poke data into user area directly for non floating-point registers
             // offset within user area must be aligned on an 8-byte boundary
             // calculate the aligned offset within the user struct and read the word to save from there
-            let aligned_offset = info.offset & 0b111;
+            // clear lower 3 bits to align on 8-byte boundary
+            let aligned_offset = info.offset & !0b111;
             let aligned_p = unsafe { user_start_p.add(aligned_offset) };
             let word = unsafe { u64::from_bytes_raw(aligned_p as *const u8) };
-            self.write_user_area(info.offset, word)
+            self.write_user_area(aligned_offset, word)
         }
     }
 

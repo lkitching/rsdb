@@ -1,5 +1,6 @@
 use std::io::{self, Read, Write};
 use std::mem;
+use std::os::fd::{RawFd};
 
 use libc::{self, c_void, c_int, size_t, O_CLOEXEC, pipe2, close};
 
@@ -44,6 +45,14 @@ impl Pipe {
 
     pub fn release_write(&mut self) -> c_int {
         mem::replace(&mut self.fds[Self::WRITE_FD], -1)
+    }
+
+    pub fn read_fd(&self) -> RawFd {
+        self.fds[Self::READ_FD]
+    }
+
+    pub fn write_fd(&self) -> RawFd {
+        self.fds[Self::WRITE_FD]
     }
 }
 
