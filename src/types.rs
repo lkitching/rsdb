@@ -1,3 +1,5 @@
+use std::fmt;
+
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct Byte64 {
     bytes: [u8; 8]
@@ -25,6 +27,23 @@ impl Byte128 {
 
     pub fn to_le_bytes(self) -> [u8; 16] {
         self.bytes
+    }
+}
+
+fn format_bytes(bytes: &[u8], fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+    let byte_strs: Vec<String> = bytes.iter().map(|b| format!("{:#04x}", b)).collect();
+    write!(fmt, "[{}]", byte_strs.join(", "))
+}
+
+impl fmt::Display for Byte64 {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+        format_bytes(self.bytes.as_slice(), fmt)
+    }
+}
+
+impl fmt::Display for Byte128 {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+        format_bytes(self.bytes.as_slice(), fmt)
     }
 }
 
@@ -69,6 +88,30 @@ pub enum Value {
     F128(f128),
     Byte64(Byte64),
     Byte128(Byte128)
+}
+
+impl fmt::Display for Value {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::U8(n) => write!(fmt, "{:#04x}", n),
+            Self::U16(n) => write!(fmt, "{:#06x}", n),
+            Self::U32(n) => write!(fmt, "{:#010x}", n),
+            Self::U64(n) => write!(fmt, "{:#018x}", n),
+            Self::I8(n) => write!(fmt, "{:#04x}", n),
+            Self::I16(n) => write!(fmt, "{:#06x}", n),
+            Self::I32(n) => write!(fmt, "{:#010x}", n),
+            Self::I64(n) => write!(fmt, "{:#018x}", n),
+            Self::F32(f) => write!(fmt, "{}", f),
+            Self::F64(f) => write!(fmt, "{}", f),
+            Self::F128(f) => {
+                // NOTE: formatting is not yet implemented for f128
+                // cast to f64 and format the result
+                write!(fmt, "{}", *f as f64)
+            },
+            Self::Byte64(bytes) => bytes.fmt(fmt),
+            Self::Byte128(bytes) => bytes.fmt(fmt)
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug)]

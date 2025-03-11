@@ -24,13 +24,13 @@ type DwarfId = i32;
 
 #[derive(Clone, Debug)]
 pub struct RegisterInfo {
-    id: RegisterId,
-    name: &'static str,
-    dwarf_id: DwarfId,
-    size: usize,
-    offset: usize,
-    ty: RegisterType,
-    format: RegisterFormat
+    pub id: RegisterId,
+    pub name: &'static str,
+    pub dwarf_id: DwarfId,
+    pub size: usize,
+    pub offset: usize,
+    pub ty: RegisterType,
+    pub format: RegisterFormat
 }
 
 registers![
@@ -124,6 +124,10 @@ pub fn register_info_by_id(id: RegisterId) -> &'static RegisterInfo {
 
 pub fn register_info_by_name(name: &str) -> &'static RegisterInfo {
     register_info_by(|r| r.name == name)
+}
+
+pub fn find_register_info_by_name(name: &str) -> Option<&'static RegisterInfo> {
+    REGISTER_INFOS.iter().find(|r| r.name == name)
 }
 
 pub fn register_info_by_dwarf(dwarf_id: DwarfId) -> &'static RegisterInfo {
