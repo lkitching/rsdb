@@ -323,4 +323,9 @@ impl Registers {
         let reg_info = register_info_by_id(id);
         self.write(reg_info, v.into())
     }
+
+    pub fn get_pc(&self) -> VirtualAddress {
+        let addr = self.read_by_id_as(RegisterId::rip);
+        VirtualAddress::new(addr)
+    }
 }

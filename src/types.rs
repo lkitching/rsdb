@@ -1,4 +1,6 @@
 use std::fmt;
+use std::fmt::Formatter;
+use std::ops::{Add, Sub, AddAssign, SubAssign};
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct Byte64 {
@@ -414,5 +416,69 @@ impl TryWiden for Value {
             Self::Byte64(bs) => bs.try_widen(size),
             Self::Byte128(bs) => bs.try_widen(size),
         }
+    }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct VirtualAddress {
+    addr: u64
+}
+
+impl VirtualAddress {
+    pub fn new(addr: u64) -> Self {
+        Self { addr }
+    }
+}
+
+impl From<u64> for VirtualAddress {
+    fn from(addr: u64) -> Self {
+        Self::new(addr)
+    }
+}
+
+impl Add<i64> for VirtualAddress {
+    type Output = Self;
+    fn add(self, rhs: i64) -> Self {
+        let addr = if rhs < 0 {
+            self.addr - rhs.abs() as u64
+        } else {
+            self.addr + rhs as u64
+        };
+
+        Self::new(addr)
+    }
+}
+
+impl AddAssign<i64> for VirtualAddress {
+    fn add_assign(&mut self, rhs: i64) {
+        let r = *self + rhs;
+        *self = r;
+    }
+}
+
+impl Sub<i64> for VirtualAddress {
+    type Output = Self;
+
+    fn sub(self, rhs: i64) -> Self::Output {
+        let addr = if rhs >= 0 {
+            self.addr - rhs as u64
+        } else {
+            self.addr + rhs.abs() as u64
+        };
+
+        Self::new(addr)
+    }
+}
+
+impl SubAssign<i64> for VirtualAddress {
+    fn sub_assign(&mut self, rhs: i64) {
+        let r = *self - rhs;
+        *self = r;
+    }
+}
+
+impl fmt::Display for VirtualAddress {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{:#018x}", self.addr)
     }
 }

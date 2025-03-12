@@ -13,14 +13,39 @@ use libc::{ptrace, PTRACE_TRACEME, PTRACE_ATTACH, PTRACE_CONT, c_void, c_char, c
 use crate::error::{self, Error};
 use crate::pipe::Pipe;
 use crate::process::PIDParseError::OutOfRange;
-use crate::register::{Registers};
+use crate::register::{RegisterId, Registers};
+use crate::types::VirtualAddress;
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum ProcessState {
-    Stopped,
+    Stopped(Option<VirtualAddress>),
     Running,
     Exited,
     Terminated
+}
+
+impl ProcessState {
+    pub fn stopped() -> Self {
+        Self::Stopped(None)
+    }
+
+    pub fn stopped_at(pc: VirtualAddress) -> Self {
+        Self::Stopped(Some(pc))
+    }
+
+    pub fn is_stopped(&self) -> bool {
+        if let Self::Stopped(_) = self {
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn set_pc(&mut self, pc: VirtualAddress) {
+        if self.is_stopped() {
+            *self = Self::Stopped(Some(pc))
+        }
+    }
 }
 
 //#[derive(Debug)]
@@ -73,7 +98,7 @@ impl StopReason {
             }
         } else if WIFSTOPPED(wait_status) {
             Self {
-                reason: ProcessState::Stopped,
+                reason: ProcessState::stopped(),
                 info: WSTOPSIG(wait_status)
             }
         } else {
@@ -102,8 +127,12 @@ impl fmt::Display for StopReason {
             ProcessState::Terminated => {
                 write!(f, "terminated with signal {}", signal_description(self.info))
             },
-            ProcessState::Stopped => {
-                write!(f, "stopped with signal {}", signal_description(self.info))
+            ProcessState::Stopped(addr_opt) => {
+                match addr_opt {
+                    None => write!(f, "stopped with signal {}", signal_description(self.info)),
+                    Some(addr) => write!(f, "stopped with signal at {}", addr)
+                }
+
             }
         }
     }
@@ -178,7 +207,7 @@ impl Process {
             }
 
             // create handle for child proces and wait if debugging
-            let mut proc = Self { pid, state: ProcessState::Stopped, terminate_on_end: true, is_attached: debug, registers: Registers::new(pid) };
+            let mut proc = Self { pid, state: ProcessState::stopped(), terminate_on_end: true, is_attached: debug, registers: Registers::new(pid) };
 
             if debug {
                 proc.wait_on_signal()?;
@@ -193,8 +222,14 @@ impl Process {
             return Err(Error::from_errno("Could not attach"));
         }
 
-        let mut proc = Self { pid: pid.0, state: ProcessState::Stopped, terminate_on_end: false, is_attached: true, registers: Registers::new(pid.0) };
+        // read all register and get program counter
+        let mut registers = Registers::new(pid.0);
+        registers.read_all()?;
+        let state = ProcessState::stopped_at(registers.get_pc());
+
+        let mut proc = Self { pid: pid.0, state, terminate_on_end: false, is_attached: true, registers };
         proc.wait_on_signal()?;
+
         Ok(proc)
     }
 
@@ -216,13 +251,16 @@ impl Process {
             }
             status
         };
-        let stop_reason = StopReason::from_status(wait_status);
-        self.state = stop_reason.reason;
+        let mut stop_reason = StopReason::from_status(wait_status);
 
-        if self.is_attached && self.state == ProcessState::Stopped {
+        if self.is_attached && stop_reason.reason.is_stopped() {
+            // read all registers and get program counter for stop state
             self.read_all_registers()?;
+            let pc = self.get_pc();
+            stop_reason.reason.set_pc(pc);
         }
 
+        self.state = stop_reason.reason;
         Ok(stop_reason)
     }
 
@@ -245,6 +283,10 @@ impl Process {
     pub fn registers(&self) -> &Registers { &self.registers }
 
     pub fn registers_mut(&mut self) -> &mut Registers { &mut self.registers }
+
+    pub fn get_pc(&self) -> VirtualAddress {
+        self.registers.get_pc()
+    }
 }
 
 impl Drop for Process {
@@ -443,7 +485,7 @@ mod test {
 
         proc.resume().expect("Failed to resume");
         let reason = proc.wait_on_signal().expect("Failed to wait");
-        assert_eq!(ProcessState::Stopped, reason.reason);
+        assert!(reason.reason.is_stopped());
 
         {
             // read r13
