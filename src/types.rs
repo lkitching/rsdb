@@ -247,6 +247,7 @@ pub trait TryWiden {
 impl TryWiden for u8 {
     fn try_widen(self, size: usize) -> Result<Value, RegisterSizeError> {
         match size {
+            1 => { Ok(self.into()) }
             2 => { Ok((self as u16).into()) },
             4 => { Ok((self as u32).into()) },
             8 => { Ok((self as u64).into()) },
@@ -293,6 +294,7 @@ impl TryWiden for u64 {
 impl TryWiden for i8 {
     fn try_widen(self, size: usize) -> Result<Value, RegisterSizeError> {
         match size {
+            1 => Ok(self.into()),
             2 => Ok((self as i16).into()),
             4 => Ok((self as i32).into()),
             8 => Ok((self as i64).into()),
