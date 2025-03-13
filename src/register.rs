@@ -1,11 +1,10 @@
 use core::mem::{self, offset_of, transmute};
-use std::ffi::c_void;
-use std::ptr;
-use libc::{user, user_fpregs_struct, user_regs_struct, pid_t, PTRACE_GETREGS, PTRACE_GETFPREGS, ptrace, size_t, PTRACE_POKEUSER, PTRACE_PEEKUSER, c_ulonglong, PTRACE_SETFPREGS, PTRACE_SETREGS};
+use libc::{user, user_fpregs_struct, user_regs_struct, pid_t, size_t, c_ulonglong};
 
 use registers_macro::{registers};
-use crate::error::{errno, set_errno, Error};
+use crate::error::{Error};
 use crate::types::*;
+use crate::interop::ptrace;
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum RegisterFormat {
@@ -157,21 +156,12 @@ impl Registers {
     }
 
     pub fn read_all(&mut self) -> Result<(), Error> {
-        if unsafe { ptrace(PTRACE_GETREGS, self.pid, ptr::null::<c_void>(), &mut self.data.regs as *mut user_regs_struct as *mut c_void) } < 0 {
-            return Err(Error::from_errno("Could not read GPR registers"));
-        }
-
-        if unsafe { ptrace(PTRACE_GETFPREGS, self.pid, ptr::null::<c_void>(), &mut self.data.i387 as *mut user_fpregs_struct as *mut c_void) } < 0 {
-            return Err(Error::from_errno("Could not read FPR registers"));
-        }
+        ptrace::get_regs(self.pid, &mut self.data.regs)?;
+        ptrace::get_fp_regs(self.pid, &mut self.data.i387)?;
 
         for (index, debug_reg) in debug_register_infos().enumerate() {
-            set_errno(0);
             let offset = debug_reg.offset as size_t;
-            let data = unsafe { ptrace(PTRACE_PEEKUSER, self.pid, offset as *const size_t as *const c_void, ptr::null::<c_void>()) };
-            if errno() != 0 {
-                return Err(Error::from_errno("Could not read debug register"));
-            }
+            let data = ptrace::peek_user(self.pid, offset).map_err(|e| e.with_context("Could not read debug register"))?;
 
             // can use transmute here?
             self.data.u_debugreg[index] = c_ulonglong::from_le_bytes(data.to_le_bytes());
@@ -184,10 +174,7 @@ impl Registers {
     /// Writes the given word to the user area for this process
     /// offset must be word-aligned i.e. on an 8-byte boundary
     pub fn write_user_area(&mut self, offset: size_t, word: u64) -> Result<(), Error> {
-        if unsafe { ptrace(PTRACE_POKEUSER, self.pid, offset as *const size_t as *const c_void, word as *const u64 as *const c_void) } < 0 {
-            return Err(Error::from_errno("Could not write to user area"));
-        }
-        Ok(())
+        ptrace::poke_user(self.pid, offset, word)
     }
 
     pub fn read(&self, info: &RegisterInfo) -> Value {
@@ -259,17 +246,11 @@ impl Registers {
     }
 
     fn write_fprs(&mut self) -> Result<(), Error> {
-        if unsafe { ptrace(PTRACE_SETFPREGS, self.pid, ptr::null::<c_void>(), &self.data.i387 as *const user_fpregs_struct as *const c_void) } < 0 {
-            return Err(Error::from_errno("Could not write floating point registers"));
-        }
-        Ok(())
+        ptrace::set_fp_regs(self.pid, &self.data.i387)
     }
 
     fn write_gprs(&mut self) -> Result<(), Error> {
-        if unsafe { ptrace(PTRACE_SETREGS, self.pid, ptr::null::<c_void>(), &self.data.regs as *const user_regs_struct as *const c_void) } < 0 {
-            return Err(Error::from_errno("Could not write general purpose registers"));
-        }
-        Ok(())
+        ptrace::set_regs(self.pid, &self.data.regs)
     }
 
     pub fn read_by_id_as<T: TryFrom<Value,Error=RegisterValueError>>(&self, id: RegisterId) -> T {

@@ -37,7 +37,8 @@ pub fn strerror(errno: c_int) -> String {
 pub enum Error {
     Message(String),
     ErrnoStr(&'static str, c_int),
-    IOError(io::Error)
+    IOError(io::Error),
+    Context(Box<Self>, String)
 }
 
 impl Error {
@@ -47,6 +48,10 @@ impl Error {
 
     pub fn from_errno(prefix: &'static str) -> Self {
         Self::ErrnoStr(prefix, errno())
+    }
+
+    pub fn with_context(self, msg: &str) -> Self {
+        Self::Context(Box::new(self), msg.to_string())
     }
 }
 
@@ -67,6 +72,9 @@ impl Display for Error {
             },
             Self::IOError(e) => {
                 e.fmt(f)
+            },
+            Self::Context(inner, msg) => {
+                write!(f, "{}: {}", msg, inner)
             }
         }
     }

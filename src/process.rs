@@ -1,16 +1,19 @@
 use std::fmt;
 use std::str::{FromStr};
 use std::ptr;
-use std::ffi::{CString, CStr};
+use std::ffi::{CStr};
 use std::fmt::Formatter;
 use std::num::ParseIntError;
 use std::io::{Read, Write};
 use std::os::fd::{RawFd};
 
-use libc::{pid_t, fork, PTRACE_DETACH, WIFEXITED, WIFSIGNALED, SIGKILL, STDOUT_FILENO, dup2};
-use libc::{ptrace, PTRACE_TRACEME, PTRACE_ATTACH, PTRACE_CONT, c_void, c_char, c_int, execlp, waitpid, kill, SIGSTOP, SIGCONT, WEXITSTATUS, WTERMSIG, WIFSTOPPED, WSTOPSIG, strsignal};
+use libc::{pid_t, fork, WIFEXITED, WIFSIGNALED, SIGKILL, STDOUT_FILENO};
+use libc::{c_int, waitpid, kill, SIGSTOP, SIGCONT, WEXITSTATUS, WTERMSIG, WIFSTOPPED, WSTOPSIG, strsignal};
 
-use crate::error::{self, Error};
+use crate::error::{Error};
+
+use crate::interop;
+use crate::interop::ptrace;
 use crate::pipe::Pipe;
 use crate::process::PIDParseError::OutOfRange;
 use crate::register::{RegisterId, Registers};
@@ -138,9 +141,9 @@ impl fmt::Display for StopReason {
     }
 }
 
-fn exit_with_perror(channel: &mut Pipe, prefix: &str) -> ! {
+fn exit_with_perror(channel: &mut Pipe, error: Error) -> ! {
     // write error message to pipe
-    let msg = format!("{}: {}", prefix, error::strerror(error::errno()));
+    let msg = error.to_string();
 
     let _r = channel.write(msg.as_bytes());
     std::process::exit(-1);
@@ -170,22 +173,22 @@ impl Process {
 
             // replace stdout with given file hande if specified
             if let StdoutReplacement::Fd(fd) = stdout_replacement {
-                if unsafe { dup2(fd, STDOUT_FILENO) } < 0 {
-                    exit_with_perror(&mut pipe, "stdout replacement failed");
+                if let Err(e) = interop::dup2(fd, STDOUT_FILENO) {
+                    let e = e.with_context("stdout replacement failed");
+                    exit_with_perror(&mut pipe, e);
                 }
             }
 
             // configure debugging if required
             if debug {
-                if unsafe { ptrace(PTRACE_TRACEME, 0, ptr::null::<c_void>(), ptr::null::<c_void>()) } < 0 {
-                    exit_with_perror(&mut pipe, "Tracing failed");
+                if let Err(e) = ptrace::traceme() {
+                    exit_with_perror(&mut pipe, e);
                 }
             }
 
             // execute debuggee
-            let path_s = CString::new(path).expect("Invalid CString");
-            if unsafe { execlp(path_s.as_ptr(), path_s.as_ptr(), ptr::null::<c_char>()) } < 0 {
-                exit_with_perror(&mut pipe, "exec failed");
+            if let Err(e) = interop::execlp0(path) {
+                exit_with_perror(&mut pipe, e)
             }
 
             // if execlp succeeds then this line should not be reached
@@ -218,9 +221,7 @@ impl Process {
     }
 
     pub fn attach(pid: PID) -> Result<Self, Error> {
-        if unsafe { ptrace(PTRACE_ATTACH, pid.0, ptr::null::<c_void>(), ptr::null::<c_void>()) } < 0 {
-            return Err(Error::from_errno("Could not attach"));
-        }
+        ptrace::attach(pid.0)?;
 
         // read all register and get program counter
         let mut registers = Registers::new(pid.0);
@@ -234,12 +235,9 @@ impl Process {
     }
 
     pub fn resume(&mut self) -> Result<(), Error> {
-        if unsafe { ptrace(PTRACE_CONT, self.pid, ptr::null::<c_void>(), ptr::null::<c_void>()) } < 0 {
-            Err(Error::from_errno("Could not resume"))
-        } else {
-            self.state = ProcessState::Running;
-            Ok(())
-        }
+        ptrace::cont(self.pid)?;
+        self.state = ProcessState::Running;
+        Ok(())
     }
 
     pub fn wait_on_signal(&mut self) -> Result<StopReason, Error> {
@@ -307,7 +305,7 @@ impl Drop for Process {
             if self.is_attached {
                 unsafe {
                     // NOTE: errors ignored
-                    ptrace(PTRACE_DETACH, self.pid, ptr::null::<c_void>(), ptr::null::<c_void>());
+                    let _r = ptrace::detach(self.pid);
                     kill(self.pid, SIGCONT);
                 }
             }
