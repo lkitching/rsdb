@@ -268,7 +268,7 @@ impl Process {
         self.registers.read_all()
     }
 
-    pub fn write_user_area(&mut self, offset: usize, word: u64) -> Result<(), Error> {
+    pub fn write_user_area(&mut self, offset: usize, word: usize) -> Result<(), Error> {
         self.registers.write_user_area(offset, word)
     }
 

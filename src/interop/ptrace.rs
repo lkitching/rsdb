@@ -70,18 +70,19 @@ pub fn set_fp_regs(pid: pid_t, regs: &user_fpregs_struct) -> Result<(), Error> {
     }
 }
 
-pub fn peek_user(pid: pid_t, offset: size_t) -> Result<c_long, Error> {
+pub fn peek_user(pid: pid_t, offset: size_t) -> Result<usize, Error> {
     set_errno(0);
     let data = unsafe { ptrace(PTRACE_PEEKUSER, pid, offset as *const size_t as *const c_void, ptr::null::<c_void>()) };
     if errno() != 0 {
         Err(Error::from_errno("Could not read from user area"))
     } else {
-        Ok(data)
+        let word: usize = unsafe { mem::transmute(data) };
+        Ok(word)
     }
 }
 
-pub fn poke_user(pid: pid_t, offset: size_t, word: u64) -> Result<(), Error> {
-    if unsafe { ptrace(PTRACE_POKEUSER, pid, offset as *const size_t as *const c_void, word as *const u64 as *const c_void) } < 0 {
+pub fn poke_user(pid: pid_t, offset: size_t, word: usize) -> Result<(), Error> {
+    if unsafe { ptrace(PTRACE_POKEUSER, pid, offset as *const size_t as *const c_void, word as *const c_void) } < 0 {
         Err(Error::from_errno("Could not write to user area"))
     } else {
         Ok(())

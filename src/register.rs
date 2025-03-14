@@ -173,7 +173,7 @@ impl Registers {
 
     /// Writes the given word to the user area for this process
     /// offset must be word-aligned i.e. on an 8-byte boundary
-    pub fn write_user_area(&mut self, offset: size_t, word: u64) -> Result<(), Error> {
+    pub fn write_user_area(&mut self, offset: size_t, word: usize) -> Result<(), Error> {
         ptrace::poke_user(self.pid, offset, word)
     }
 
@@ -295,7 +295,7 @@ impl Registers {
             // clear lower 3 bits to align on 8-byte boundary
             let aligned_offset = info.offset & !0b111;
             let aligned_p = unsafe { user_start_p.add(aligned_offset) };
-            let word = unsafe { u64::from_bytes_raw(aligned_p as *const u8) };
+            let word = unsafe { usize::from_bytes_raw(aligned_p as *const u8) };
             self.write_user_area(aligned_offset, word)
         }
     }

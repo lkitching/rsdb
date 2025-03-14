@@ -188,6 +188,7 @@ derive_from_bytes_raw!(f64, 8);
 derive_from_bytes_raw!(f128, 16);
 derive_from_bytes_raw!(Byte64, 8);
 derive_from_bytes_raw!(Byte128, 16);
+derive_from_bytes_raw!(usize, 8);
 
 // TODO: don't need copy super trait?
 pub trait ToBytes : Copy {
