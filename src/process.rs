@@ -11,13 +11,14 @@ use libc::{pid_t, fork, WIFEXITED, WIFSIGNALED, SIGKILL, STDOUT_FILENO};
 use libc::{c_int, waitpid, kill, SIGSTOP, SIGCONT, WEXITSTATUS, WTERMSIG, WIFSTOPPED, WSTOPSIG, strsignal};
 
 use crate::error::{Error};
-
 use crate::interop;
 use crate::interop::ptrace;
 use crate::pipe::Pipe;
 use crate::process::PIDParseError::OutOfRange;
 use crate::register::{RegisterId, Registers};
 use crate::types::VirtualAddress;
+use crate::stoppoint_collection::{StopPoint, StopPointCollection};
+use crate::breakpoint_site::{BreakpointSite};
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum ProcessState {
@@ -57,7 +58,8 @@ pub struct Process {
     state: ProcessState,
     terminate_on_end: bool,
     is_attached: bool,
-    registers: Registers
+    registers: Registers,
+    breakpoint_sites: StopPointCollection<BreakpointSite>
 }
 
 pub struct StopReason {
@@ -210,7 +212,7 @@ impl Process {
             }
 
             // create handle for child proces and wait if debugging
-            let mut proc = Self { pid, state: ProcessState::stopped(), terminate_on_end: true, is_attached: debug, registers: Registers::new(pid) };
+            let mut proc = Self { pid, state: ProcessState::stopped(), terminate_on_end: true, is_attached: debug, registers: Registers::new(pid), breakpoint_sites: StopPointCollection::new() };
 
             if debug {
                 proc.wait_on_signal()?;
@@ -228,7 +230,7 @@ impl Process {
         registers.read_all()?;
         let state = ProcessState::stopped_at(registers.get_pc());
 
-        let mut proc = Self { pid: pid.0, state, terminate_on_end: false, is_attached: true, registers };
+        let mut proc = Self { pid: pid.0, state, terminate_on_end: false, is_attached: true, registers, breakpoint_sites: StopPointCollection::new() };
         proc.wait_on_signal()?;
 
         Ok(proc)
@@ -285,6 +287,17 @@ impl Process {
     pub fn get_pc(&self) -> VirtualAddress {
         self.registers.get_pc()
     }
+
+    pub fn create_breakpoint_site(&mut self, address: VirtualAddress) -> Result<&BreakpointSite, Error> {
+        if self.breakpoint_sites.contains_address(address) {
+            Err(Error::from_message(format!("Breakpoint site already created at address {}", address)))
+        } else {
+            let bp = BreakpointSite::new(self.pid, address);
+            Ok(self.breakpoint_sites.push(bp))
+        }
+    }
+
+    pub fn breakpoint_sites(&self) -> &StopPointCollection<BreakpointSite> { &self.breakpoint_sites }
 }
 
 impl Drop for Process {
@@ -528,6 +541,111 @@ mod test {
 
             // TODO: figure out how to get the expected bytes for an 80-bit float
             //assert_eq!(expected_bytes, v, "Unexpected value for st0");
+        }
+    }
+
+    #[test]
+    fn can_create_breakpoint_site_test() {
+        let mut proc = Process::launch("target/debug/run_endlessly", true, StdoutReplacement::None).expect("Failed to launch process");
+        let site_address = VirtualAddress::new(42);
+        let site = proc.create_breakpoint_site(site_address).expect("Failed to create breakpoint");
+
+        assert_eq!(site_address, site.address(), "Unexpected breakpoint address");
+    }
+
+    #[test]
+    fn breakpoint_site_ids_increase() {
+        let mut proc = Process::launch("target/debug/run_endlessly", true, StdoutReplacement::None).expect("Failed to launch process");
+
+        let (s1_id, s1_addr) = {
+            let s1 = proc.create_breakpoint_site(VirtualAddress::new(42)).expect("Failed to create breakpoint s1");
+            (s1.id(), s1.address())
+        };
+        assert_eq!(VirtualAddress::new(42), s1_addr);
+
+        let s2_id = {
+            let s2 = proc.create_breakpoint_site(VirtualAddress::new(43)).expect("Failed to create breakpoint s2");
+            s2.id()
+        };
+        assert_eq!(s2_id, s1_id + 1);
+
+        let s3_id = {
+            let s3 = proc.create_breakpoint_site(VirtualAddress::new(44)).expect("Failed to create breakpoint s3");
+            s3.id()
+        };
+        assert_eq!(s3_id, s1_id + 2);
+
+        let s4_id = {
+            let s4 = proc.create_breakpoint_site(VirtualAddress::new(45)).expect("Failed to create breakpoint s4");
+            s4.id()
+        };
+        assert_eq!(s4_id, s1_id + 3);
+    }
+
+    #[test]
+    fn can_find_breakpoint_site_test() {
+        let mut proc = Process::launch("target/debug/run_endlessly", true, StdoutReplacement::None).expect("Failed to launch process");
+
+        proc.create_breakpoint_site(VirtualAddress::new(42)).expect("Failed to create breakpoint 1");
+        proc.create_breakpoint_site(VirtualAddress::new(43)).expect("Failed to create breakpoint 2");
+        proc.create_breakpoint_site(VirtualAddress::new(44)).expect("Failed to create breakpoint 3");
+        proc.create_breakpoint_site(VirtualAddress::new(45)).expect("Failed to create breakpoint 4");
+
+        let s1 = proc.breakpoint_sites.get_by_address(VirtualAddress::new(44)).expect("Failed to get breakpoint site 1");
+        assert!(proc.breakpoint_sites().contains_address(VirtualAddress::new(44)), "Expected breakpoint to exist");
+        assert_eq!(VirtualAddress::new(44), s1.address());
+
+        // NOTE: c++ const tests ignored
+
+        let s2 = proc.breakpoint_sites().get_by_id(s1.id() + 1).expect("Failed to get breakpoint site 2");
+        assert!(proc.breakpoint_sites().contains_id(s1.id() + 1), "Expected breakpoint with id to exist");
+        assert_eq!(s2.id(), s1.id() + 1, "Unexpected id for breakpoint 2");
+        assert_eq!(VirtualAddress::new(45), s2.address(), "Unexpected address for breakpoint 2");
+
+        // NOTE: more const tests ignored
+    }
+
+    #[test]
+    fn cannot_find_breakpoint_site_test() {
+        let mut proc = Process::launch("target/debug/run_endlessly", true, StdoutReplacement::None).expect("Failed to create breakpoint site");
+
+        assert!(proc.breakpoint_sites().get_by_address(VirtualAddress::new(44)).is_err(), "Unexpected breakpoint at address");
+        assert!(proc.breakpoint_sites().get_by_id(44).is_err(), "Unexpected breakpoint with id");
+    }
+
+    #[test]
+    fn breakpoint_site_list_and_emptiness_test() {
+        let mut proc = Process::launch("target/debug/run_endlessly", true, StdoutReplacement::None).expect("Failed to launch process");
+
+        assert!(proc.breakpoint_sites().is_empty(), "Expected empty breakpoint list on launch");
+        assert_eq!(0, proc.breakpoint_sites().len(), "Expected zero length breakpoint list on launch");
+
+        proc.create_breakpoint_site(VirtualAddress::new(42)).expect("Failed to create first breakpoint site");
+        assert_eq!(false, proc.breakpoint_sites().is_empty(), "Expected non-empty breakpoint list after create");
+        assert_eq!(1, proc.breakpoint_sites().len(), "Expected singleton breakpoint list after create");
+
+        proc.create_breakpoint_site(VirtualAddress::new(43)).expect("Failed to create second breakpoint site");
+        assert_eq!(false, proc.breakpoint_sites.is_empty(), "Expected non-empty breakpoint list after second breakpoint created");
+        assert_eq!(2, proc.breakpoint_sites().len(), "Expected breakpoint list of length 2 after second breakpoint created");
+    }
+
+    #[test]
+    fn can_iterate_breakpoint_sites_test() {
+        let mut proc = Process::launch("target/debug/run_endlessly", true, StdoutReplacement::None).expect("Failed to launch process");
+
+        {
+            proc.create_breakpoint_site(VirtualAddress::new(42)).expect("Failed to create breakpoint site 1");
+            proc.create_breakpoint_site(VirtualAddress::new(43)).expect("Failed to create breakpoint site 2");
+            proc.create_breakpoint_site(VirtualAddress::new(44)).expect("Failed to create breakpoint site 3");
+            proc.create_breakpoint_site(VirtualAddress::new(45)).expect("Failed to create breakpoint site 4");
+        }
+
+        {
+            let mut addr = 42;
+            for site in proc.breakpoint_sites().iter() {
+                assert_eq!(VirtualAddress::new(addr), site.address(), "Unexpected breakpoint address");
+                addr += 1;
+            }
         }
     }
 }
