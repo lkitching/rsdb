@@ -1,8 +1,10 @@
-use std::ptr;
+use std::{mem, ptr};
 
 use libc::{c_void, pid_t, user_fpregs_struct, user_regs_struct, c_long, size_t};
 use libc::{ptrace, PTRACE_TRACEME, PTRACE_ATTACH, PTRACE_CONT, PTRACE_DETACH, PTRACE_GETREGS, PTRACE_GETFPREGS, PTRACE_PEEKUSER, PTRACE_POKEUSER, PTRACE_SETREGS, PTRACE_SETFPREGS};
+use libc::{PTRACE_PEEKDATA, PTRACE_POKEDATA};
 use crate::error::*;
+use crate::types::VirtualAddress;
 
 pub fn traceme() -> Result<(), Error> {
     if unsafe { ptrace(PTRACE_TRACEME, 0, ptr::null::<c_void>(), ptr::null::<c_void>()) } < 0 {
@@ -81,6 +83,27 @@ pub fn peek_user(pid: pid_t, offset: size_t) -> Result<c_long, Error> {
 pub fn poke_user(pid: pid_t, offset: size_t, word: u64) -> Result<(), Error> {
     if unsafe { ptrace(PTRACE_POKEUSER, pid, offset as *const size_t as *const c_void, word as *const u64 as *const c_void) } < 0 {
         Err(Error::from_errno("Could not write to user area"))
+    } else {
+        Ok(())
+    }
+}
+
+pub fn peek_data(pid: pid_t, address: VirtualAddress) -> Result<usize, Error> {
+    set_errno(0);
+    let address: u64 = address.into();
+    let data = unsafe { ptrace(PTRACE_PEEKDATA, pid, address as *const u64 as *const c_void, ptr::null::<c_void>()) };
+    if errno() != 0 {
+        Err(Error::from_errno("Could not read data"))
+    } else {
+        let word: usize = unsafe { mem::transmute(data) };
+        Ok(word)
+    }
+}
+
+pub fn poke_data(pid: pid_t, address: VirtualAddress, word: usize) -> Result<(), Error> {
+    let address: u64 = address.into();
+    if unsafe { ptrace(PTRACE_POKEDATA, pid, address as *const u64 as *const c_void, word as *const c_void) } < 0 {
+        Err(Error::from_errno("Failed to write data"))
     } else {
         Ok(())
     }

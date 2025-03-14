@@ -10,6 +10,10 @@ pub trait StopPoint {
 
     fn is_enabled(&self) -> bool;
 
+    fn is_disabled(&self) -> bool {
+        !self.is_enabled()
+    }
+
     fn disable(&mut self);
 }
 

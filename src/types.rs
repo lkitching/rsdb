@@ -436,6 +436,10 @@ impl From<u64> for VirtualAddress {
     }
 }
 
+impl From<VirtualAddress> for u64 {
+    fn from(addr: VirtualAddress) -> Self { addr.addr }
+}
+
 impl Add<i64> for VirtualAddress {
     type Output = Self;
     fn add(self, rhs: i64) -> Self {

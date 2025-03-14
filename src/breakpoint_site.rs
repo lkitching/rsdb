@@ -3,6 +3,8 @@ use libc::{pid_t};
 
 use crate::types::VirtualAddress;
 use crate::stoppoint_collection::{StopPoint};
+use crate::error::Error;
+use crate::interop::ptrace;
 
 static ID_COUNTER: AtomicU32 = AtomicU32::new(1);
 
@@ -27,6 +29,42 @@ impl BreakpointSite {
 
     pub fn address(&self) -> VirtualAddress {
         self.address
+    }
+
+    pub fn enable(&mut self) -> Result<(), Error> {
+        if self.is_enabled {
+            return Ok(());
+        }
+
+        let data = ptrace::peek_data(self.pid, self.address).map_err(|e| e.with_context("Failed to enable breakpoint site"))?;
+
+        // mask off all but low byte and save
+        self.saved_data = (data & 0xFF) as u8;
+
+        // set lower byte of data to 0xCC
+        let data_with_int3 = (data & !0xFF) | 0xCC;
+        ptrace::poke_data(self.pid, self.address, data_with_int3)?;
+
+        self.is_enabled = true;
+        Ok(())
+    }
+
+    pub fn disable(&mut self) -> Result<(), Error> {
+        if self.is_disabled() {
+            return Ok(());
+        }
+
+        // read word at breakpoint address
+        let data = ptrace::peek_data(self.pid, self.address)?;
+
+        // clear low byte and restore saved data into it
+        let restored_data = (data & !0xFF) | (self.saved_data as usize);
+
+        // write resulting word back into memory
+        ptrace::poke_data(self.pid, self.address, restored_data)?;
+
+        self.is_enabled = false;
+        Ok(())
     }
 }
 
