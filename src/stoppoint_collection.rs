@@ -22,9 +22,10 @@ pub struct StopPointCollection<S> {
 }
 
 impl <S : StopPoint> StopPointCollection<S> {
-    pub fn push(&mut self, point: S) -> &S {
+    pub fn push(&mut self, point: S) -> &mut S {
         self.stop_points.push(point);
-        &self.stop_points[self.stop_points.len() - 1]
+        let inserted_at = self.stop_points.len() - 1;
+        &mut self.stop_points[inserted_at]
     }
 
     pub fn contains_id(&self, id: S::IdType) -> bool {
@@ -41,6 +42,10 @@ impl <S : StopPoint> StopPointCollection<S> {
 
     pub fn get_by_id(&self, id: S::IdType) -> Result<&S, Error> {
         self.find_by_id(id).ok_or_else(|| Error::from_message(String::from("Invalid stoppoint id")))
+    }
+
+    pub fn get_by_id_mut(&mut self, id: S::IdType) -> Result<&mut S, Error> {
+        self.find_by_id_mut(id).ok_or_else(|| Error::from_message(String::from("Invalid stoppoint id")))
     }
 
     pub fn get_by_address(&self, address: VirtualAddress) -> Result<&S, Error> {

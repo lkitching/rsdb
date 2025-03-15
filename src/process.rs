@@ -288,7 +288,7 @@ impl Process {
         self.registers.get_pc()
     }
 
-    pub fn create_breakpoint_site(&mut self, address: VirtualAddress) -> Result<&BreakpointSite, Error> {
+    pub fn create_breakpoint_site(&mut self, address: VirtualAddress) -> Result<&mut BreakpointSite, Error> {
         if self.breakpoint_sites.contains_address(address) {
             Err(Error::from_message(format!("Breakpoint site already created at address {}", address)))
         } else {
@@ -298,6 +298,7 @@ impl Process {
     }
 
     pub fn breakpoint_sites(&self) -> &StopPointCollection<BreakpointSite> { &self.breakpoint_sites }
+    pub fn breakpoint_sites_mut(&mut self) -> &mut StopPointCollection<BreakpointSite> { &mut self.breakpoint_sites }
 }
 
 impl Drop for Process {

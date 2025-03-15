@@ -1,6 +1,8 @@
 use std::fmt;
 use std::fmt::Formatter;
+use std::num::ParseIntError;
 use std::ops::{Add, Sub, AddAssign, SubAssign};
+use std::str::{FromStr};
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct Byte64 {
@@ -485,5 +487,20 @@ impl SubAssign<i64> for VirtualAddress {
 impl fmt::Display for VirtualAddress {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{:#018x}", self.addr)
+    }
+}
+
+impl FromStr for VirtualAddress {
+    type Err = ParseIntError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let num_str = if s.starts_with("0x") || s.starts_with("0X") {
+            &s[2..]
+        } else {
+            s
+        };
+
+        let addr = u64::from_str_radix(num_str, 16)?;
+        Ok(Self { addr })
     }
 }
