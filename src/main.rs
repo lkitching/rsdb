@@ -58,6 +58,7 @@ fn attach(args: &[String]) -> Result<Process, DebuggerError> {
     } else {
         let program_path = args[1].as_str();
         let proc = Process::launch(program_path, true, StdoutReplacement::None)?;
+        println!("Launched process with PID {}", proc.pid());
         Ok(proc)
     }
 }

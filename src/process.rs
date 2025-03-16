@@ -7,7 +7,7 @@ use std::num::ParseIntError;
 use std::io::{Read, Write};
 use std::os::fd::{RawFd};
 
-use libc::{pid_t, fork, WIFEXITED, WIFSIGNALED, SIGKILL, STDOUT_FILENO};
+use libc::{pid_t, WIFEXITED, WIFSIGNALED, SIGKILL, STDOUT_FILENO, ADDR_NO_RANDOMIZE};
 use libc::{c_int, waitpid, kill, SIGSTOP, SIGCONT, WEXITSTATUS, WTERMSIG, WIFSTOPPED, WSTOPSIG, strsignal};
 
 use crate::error::{Error};
@@ -164,6 +164,8 @@ impl Process {
 
         match interop::fork()? {
             ForkResult::InChild => {
+                // turn off ASLR for this process
+                interop::personality(ADDR_NO_RANDOMIZE)?;
                 //close read side of pipe
                 pipe.close_read();
 
