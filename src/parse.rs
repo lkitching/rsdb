@@ -44,7 +44,7 @@ impl fmt::Display for ValueParseError {
     }
 }
 
-trait FromStrRadix : Sized {
+pub trait FromStrRadix : Sized {
     fn parse_radix(s: &str, radix: u32) -> Result<Self, ParseIntError>;
 }
 
@@ -63,7 +63,7 @@ impl_from_str_radix!(u16);
 impl_from_str_radix!(u32);
 impl_from_str_radix!(u64);
 
-fn to_integral<I: FromStrRadix>(s: &str, radix: u32) -> Result<I, ParseIntError> {
+pub fn to_integral<I: FromStrRadix>(s: &str, radix: u32) -> Result<I, ParseIntError> {
     if radix == 16 && (s.starts_with("0x") || s.starts_with("0X")) {
         I::parse_radix(&s[2..], radix)
     } else {

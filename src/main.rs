@@ -1,13 +1,16 @@
 use std::env;
 use std::fmt;
+use std::str::{FromStr};
 
 use rustyline;
 
 use librsdb::error::{Error};
-use librsdb::types::{Value};
+use librsdb::parse;
+use librsdb::types::{Value, VirtualAddress};
 use librsdb::process::{PIDParseError, Process, PID, StopReason, StdoutReplacement};
 use librsdb::register::{find_register_info_by_name, RegisterType, REGISTER_INFOS, RegisterInfo};
 use librsdb::parse::{parse_register_value};
+use librsdb::stoppoint_collection::StopPoint;
 
 #[derive(Debug)]
 enum DebuggerError {
@@ -55,6 +58,7 @@ fn attach(args: &[String]) -> Result<Process, DebuggerError> {
     } else {
         let program_path = args[1].as_str();
         let proc = Process::launch(program_path, true, StdoutReplacement::None)?;
+        println!("Launched process with PID {}", proc.pid());
         Ok(proc)
     }
 }
@@ -67,8 +71,10 @@ fn print_help(args: &[&str]) {
     match args.first() {
         None => {
             eprintln!("Available commands:");
+            eprintln!("  breakpoint - Commands for operating on breakpoints");
             eprintln!("  continue   - Resume the process");
             eprintln!("  register   - Commands for operating on registers");
+            eprintln!("  step       - Step over a single instruction")
         },
         Some(s) if "register".starts_with(s) => {
             eprintln!("Available commands:");
@@ -77,6 +83,14 @@ fn print_help(args: &[&str]) {
             eprintln!("  read all");
             eprintln!("  write <register> <value>");
         },
+        Some(s) if "breakpoint".starts_with(s) => {
+            eprintln!("Available commands:");
+            eprintln!("  list");
+            eprintln!("  delete <id>");
+            eprintln!("  disable <id>");
+            eprintln!("  enable <id>");
+            eprintln!("  set <address>");
+        }
         Some(_s) => {
             eprintln!("No help available on that");
         }
@@ -156,6 +170,61 @@ fn handle_register_command(args: &[&str], process: &mut Process) {
     }
 }
 
+fn handle_breakpoint_command(args: &[&str], process: &mut Process) -> Result<(), Error> {
+    if args.is_empty() {
+        print_help(["breakpoint"].as_slice());
+        return Ok(());
+    }
+
+    let command = args[0];
+
+    if "list".starts_with(command) {
+        if process.breakpoint_sites().is_empty() {
+            println!("No breakpoints set");
+        } else {
+            println!("Current breakpoints:");
+            for bp in process.breakpoint_sites().iter() {
+                println!("{}: address = {}, {}", bp.id(), bp.address(), if bp.is_enabled() { "enabled" } else { "disabled" });
+            }
+        }
+        return Ok(());
+    }
+
+    if args.len() < 2 {
+        print_help(["breakpoint"].as_slice());
+    }
+
+    if "set".starts_with(command) {
+        match VirtualAddress::from_str(args[1]) {
+            Ok(addr) => {
+                let bp = process.create_breakpoint_site(addr)?;
+                bp.enable()?;
+            },
+            Err(e) => {
+                eprintln!("Breakpoint command expected address in hexadecimal: {}", e);
+            }
+        }
+    } else if "enable".starts_with(command) {
+        let id = parse::to_integral(args[1], 16).expect("Invalid id");
+        let bp = process.breakpoint_sites_mut().get_by_id_mut(id)?;
+        bp.enable()?;
+    } else if "disable".starts_with(command) {
+        let id = parse::to_integral(args[1], 16).expect("Invalid id");
+        let bp = process.breakpoint_sites_mut().get_by_id_mut(id)?;
+        bp.disable()?;
+    } else if "delete".starts_with(command) {
+        let id = parse::to_integral(args[1], 16).expect("Invalid id");
+        process.breakpoint_sites_mut().remove_by_id(id);
+    } else {
+        eprintln!("Unknown breakpoint command {}", command);
+        print_help(["register"].as_slice())
+    }
+
+    // TODO: create type for UI errors?
+    // this returns ok even if command was invalid
+    Ok(())
+}
+
 fn handle_command(process: &mut Process, line: &str) -> Result<(), DebuggerError> {
     let mut args = line.split(' ');
     let command = args.next().expect("Expected at least one segment");
@@ -168,6 +237,13 @@ fn handle_command(process: &mut Process, line: &str) -> Result<(), DebuggerError
         Ok(())
     } else if "register".starts_with(command) {
         handle_register_command(command_args.as_slice(), process);
+        Ok(())
+    } else if "breakpoint".starts_with(command) {
+        handle_breakpoint_command(command_args.as_slice(), process)?;
+        Ok(())
+    } else if "step".starts_with(command) {
+        let reason = process.step_instruction()?;
+        print_stop_reason(process, &reason);
         Ok(())
     }
     else if "help".starts_with(command) {

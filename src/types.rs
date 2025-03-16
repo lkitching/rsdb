@@ -1,6 +1,8 @@
 use std::fmt;
 use std::fmt::Formatter;
+use std::num::ParseIntError;
 use std::ops::{Add, Sub, AddAssign, SubAssign};
+use std::str::{FromStr};
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct Byte64 {
@@ -188,6 +190,7 @@ derive_from_bytes_raw!(f64, 8);
 derive_from_bytes_raw!(f128, 16);
 derive_from_bytes_raw!(Byte64, 8);
 derive_from_bytes_raw!(Byte128, 16);
+derive_from_bytes_raw!(usize, 8);
 
 // TODO: don't need copy super trait?
 pub trait ToBytes : Copy {
@@ -436,6 +439,17 @@ impl From<u64> for VirtualAddress {
     }
 }
 
+impl From<VirtualAddress> for u64 {
+    fn from(addr: VirtualAddress) -> Self { addr.addr }
+}
+
+impl From<VirtualAddress> for Value {
+    fn from(addr: VirtualAddress) -> Self {
+        let addr_raw: u64 = addr.into();
+        Self::from(addr_raw)
+    }
+}
+
 impl Add<i64> for VirtualAddress {
     type Output = Self;
     fn add(self, rhs: i64) -> Self {
@@ -480,5 +494,20 @@ impl SubAssign<i64> for VirtualAddress {
 impl fmt::Display for VirtualAddress {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{:#018x}", self.addr)
+    }
+}
+
+impl FromStr for VirtualAddress {
+    type Err = ParseIntError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let num_str = if s.starts_with("0x") || s.starts_with("0X") {
+            &s[2..]
+        } else {
+            s
+        };
+
+        let addr = u64::from_str_radix(num_str, 16)?;
+        Ok(Self { addr })
     }
 }

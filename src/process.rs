@@ -7,17 +7,18 @@ use std::num::ParseIntError;
 use std::io::{Read, Write};
 use std::os::fd::{RawFd};
 
-use libc::{pid_t, fork, WIFEXITED, WIFSIGNALED, SIGKILL, STDOUT_FILENO};
+use libc::{pid_t, WIFEXITED, WIFSIGNALED, SIGKILL, STDOUT_FILENO, ADDR_NO_RANDOMIZE, SIGTRAP};
 use libc::{c_int, waitpid, kill, SIGSTOP, SIGCONT, WEXITSTATUS, WTERMSIG, WIFSTOPPED, WSTOPSIG, strsignal};
 
 use crate::error::{Error};
-
 use crate::interop;
-use crate::interop::ptrace;
+use crate::interop::{ptrace, ForkResult};
 use crate::pipe::Pipe;
 use crate::process::PIDParseError::OutOfRange;
 use crate::register::{RegisterId, Registers};
 use crate::types::VirtualAddress;
+use crate::stoppoint_collection::{StopPoint, StopPointCollection};
+use crate::breakpoint_site::{BreakpointSite};
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum ProcessState {
@@ -57,7 +58,8 @@ pub struct Process {
     state: ProcessState,
     terminate_on_end: bool,
     is_attached: bool,
-    registers: Registers
+    registers: Registers,
+    breakpoint_sites: StopPointCollection<BreakpointSite>
 }
 
 pub struct StopReason {
@@ -160,63 +162,60 @@ impl Process {
         // create pipe to communicate with child process
         let mut pipe = Pipe::create(true)?;
 
-        let pid = unsafe { fork() };
-        if pid < 0 {
-            return Err(Error::from_errno("fork failed"))
-        }
+        match interop::fork()? {
+            ForkResult::InChild => {
+                // turn off ASLR for this process
+                interop::personality(ADDR_NO_RANDOMIZE)?;
+                //close read side of pipe
+                pipe.close_read();
 
-        if pid == 0 {
-            // in child process
-
-            //close read side of pipe
-            pipe.close_read();
-
-            // replace stdout with given file hande if specified
-            if let StdoutReplacement::Fd(fd) = stdout_replacement {
-                if let Err(e) = interop::dup2(fd, STDOUT_FILENO) {
-                    let e = e.with_context("stdout replacement failed");
-                    exit_with_perror(&mut pipe, e);
+                // replace stdout with given file hande if specified
+                if let StdoutReplacement::Fd(fd) = stdout_replacement {
+                    if let Err(e) = interop::dup2(fd, STDOUT_FILENO) {
+                        let e = e.with_context("stdout replacement failed");
+                        exit_with_perror(&mut pipe, e);
+                    }
                 }
-            }
 
-            // configure debugging if required
-            if debug {
-                if let Err(e) = ptrace::traceme() {
-                    exit_with_perror(&mut pipe, e);
+                // configure debugging if required
+                if debug {
+                    if let Err(e) = ptrace::traceme() {
+                        exit_with_perror(&mut pipe, e);
+                    }
                 }
+
+                // execute debuggee
+                if let Err(e) = interop::execlp0(path) {
+                    exit_with_perror(&mut pipe, e)
+                }
+
+                // if execlp succeeds then this line should not be reached
+                unreachable!()
+            },
+            ForkResult::InParent(pid) => {
+                pipe.close_write();
+
+                // wait for child process to write to pipe
+                // pipe is closed on exec so this will be empty if exec succeeds
+                // otherwise an error message should be written by the child
+                let mut msg = String::new();
+                let bytes_written = pipe.read_to_string(&mut msg)?;
+
+                if bytes_written > 0 {
+                    // wait for child to exit
+                    unsafe { waitpid(pid, ptr::null_mut(), 0); }
+                    return Err(Error::from_message(msg));
+                }
+
+                // create handle for child proces and wait if debugging
+                let mut proc = Self { pid, state: ProcessState::stopped(), terminate_on_end: true, is_attached: debug, registers: Registers::new(pid), breakpoint_sites: StopPointCollection::new() };
+
+                if debug {
+                    proc.wait_on_signal()?;
+                }
+
+                Ok(proc)
             }
-
-            // execute debuggee
-            if let Err(e) = interop::execlp0(path) {
-                exit_with_perror(&mut pipe, e)
-            }
-
-            // if execlp succeeds then this line should not be reached
-            unreachable!()
-        } else {
-            // in parent
-            pipe.close_write();
-
-            // wait for child process to write to pipe
-            // pipe is closed on exec so this will be empty if exec succeeds
-            // otherwise an error message should be written by the child
-            let mut msg = String::new();
-            let bytes_written = pipe.read_to_string(&mut msg)?;
-
-            if bytes_written > 0 {
-                // wait for child to exit
-                unsafe { waitpid(pid, ptr::null_mut(), 0); }
-                return Err(Error::from_message(msg));
-            }
-
-            // create handle for child proces and wait if debugging
-            let mut proc = Self { pid, state: ProcessState::stopped(), terminate_on_end: true, is_attached: debug, registers: Registers::new(pid) };
-
-            if debug {
-                proc.wait_on_signal()?;
-            }
-
-            Ok(proc)
         }
     }
 
@@ -228,27 +227,36 @@ impl Process {
         registers.read_all()?;
         let state = ProcessState::stopped_at(registers.get_pc());
 
-        let mut proc = Self { pid: pid.0, state, terminate_on_end: false, is_attached: true, registers };
+        let mut proc = Self { pid: pid.0, state, terminate_on_end: false, is_attached: true, registers, breakpoint_sites: StopPointCollection::new() };
         proc.wait_on_signal()?;
 
         Ok(proc)
     }
 
     pub fn resume(&mut self) -> Result<(), Error> {
+        // if we're at a breakpoint we need to disable the breakpoint, step over it to the next
+        // instruction and then re-enable
+        let pc = self.get_pc();
+        if self.breakpoint_sites.enabled_stoppoint_at_address(pc) {
+            let pid = self.pid;
+            let bp = self.breakpoint_sites_mut().get_by_address_mut(pc)?;
+
+            // disable breakpoint and step over
+            bp.disable()?;
+            ptrace::single_step(pid)?;
+            let _wait_status = interop::wait_pid(pid, 0)?;
+
+            // re-enable breakpoint
+            bp.enable()?;
+        }
+
         ptrace::cont(self.pid)?;
         self.state = ProcessState::Running;
         Ok(())
     }
 
     pub fn wait_on_signal(&mut self) -> Result<StopReason, Error> {
-        let wait_status = {
-            let mut status = -1;
-            let options = 0;
-            if unsafe { waitpid(self.pid, &mut status, options) } < 0 {
-                return Err(Error::from_errno("waitpid failed"));
-            }
-            status
-        };
+        let wait_status = interop::wait_pid(self.pid, 0)?;
         let mut stop_reason = StopReason::from_status(wait_status);
 
         if self.is_attached && stop_reason.reason.is_stopped() {
@@ -256,17 +264,45 @@ impl Process {
             self.read_all_registers()?;
             let pc = self.get_pc();
             stop_reason.reason.set_pc(pc);
+
+            // update program counter to point to breakpoint if it's the next instruction
+            let instr_begin = pc - 1;
+            if stop_reason.info == SIGTRAP && self.breakpoint_sites().enabled_stoppoint_at_address(instr_begin) {
+                self.set_pc(instr_begin)?;
+            }
         }
 
         self.state = stop_reason.reason;
         Ok(stop_reason)
     }
 
+    pub fn step_instruction(&mut self) -> Result<StopReason, Error> {
+        let pc = self.get_pc();
+        let at_breakpoint = self.breakpoint_sites().enabled_stoppoint_at_address(pc);
+
+        if at_breakpoint {
+            // disable breakpoint at address
+            let bp = self.breakpoint_sites_mut().get_by_address_mut(pc)?;
+            bp.disable()?;
+        }
+
+        ptrace::single_step(self.pid)?;
+        let reason = self.wait_on_signal()?;
+
+        // re-enable breakpoint if required
+        if at_breakpoint {
+            let bp = self.breakpoint_sites_mut().get_by_address_mut(pc)?;
+            bp.enable()?;
+        }
+
+        Ok(reason)
+    }
+
     fn read_all_registers(&mut self) -> Result<(), Error> {
         self.registers.read_all()
     }
 
-    pub fn write_user_area(&mut self, offset: usize, word: u64) -> Result<(), Error> {
+    pub fn write_user_area(&mut self, offset: usize, word: usize) -> Result<(), Error> {
         self.registers.write_user_area(offset, word)
     }
 
@@ -285,6 +321,22 @@ impl Process {
     pub fn get_pc(&self) -> VirtualAddress {
         self.registers.get_pc()
     }
+
+    pub fn set_pc(&mut self, addr: VirtualAddress) -> Result<(), Error> {
+        self.registers.write_by_id(RegisterId::rip, addr)
+    }
+
+    pub fn create_breakpoint_site(&mut self, address: VirtualAddress) -> Result<&mut BreakpointSite, Error> {
+        if self.breakpoint_sites.contains_address(address) {
+            Err(Error::from_message(format!("Breakpoint site already created at address {}", address)))
+        } else {
+            let bp = BreakpointSite::new(self.pid, address);
+            Ok(self.breakpoint_sites.push(bp))
+        }
+    }
+
+    pub fn breakpoint_sites(&self) -> &StopPointCollection<BreakpointSite> { &self.breakpoint_sites }
+    pub fn breakpoint_sites_mut(&mut self) -> &mut StopPointCollection<BreakpointSite> { &mut self.breakpoint_sites }
 }
 
 impl Drop for Process {
@@ -328,8 +380,11 @@ impl Drop for Process {
 mod test {
     use std::io::{self, BufReader, BufRead};
     use std::fs::File;
-    use std::path::{PathBuf};
-    use libc::{ESRCH};
+    use std::mem;
+    use std::path::{Path, PathBuf};
+    use std::process::{Command};
+    use libc::{ESRCH, Elf64_Addr, Elf64_Ehdr};
+    use regex::Regex;
     use super::*;
     use crate::error::{errno};
     use crate::register::*;
@@ -357,6 +412,71 @@ mod test {
         // NOTE: rfind returns a byte index
         let status_indicator_index = proc_name_end + 2;
         Ok(line.as_bytes()[status_indicator_index] as char)
+    }
+
+    fn get_section_load_bias(path: &Path, file_address: Elf64_Addr) -> u64 {
+        let output = Command::new("readelf")
+            .args(["-W", "-S"])
+            .arg(path)
+            .output()
+            .expect("Failed to execute readelf");
+
+        let re = Regex::new(r"PROGBITS\s+(\w+)\s+(\w+)\s+(\w+)").expect("Invalid regex");
+
+        // iterate over stdout
+        for line_result in BufReader::new(output.stdout.as_slice()).lines() {
+            if let Ok(line) = line_result {
+                if let Some(captures) = re.captures(line.as_str()) {
+                    let (_, [address, offset, size]) = captures.extract();
+                    let address = u64::from_str_radix(address, 16).expect("Invalid address");
+                    let offset = u64::from_str_radix(offset, 16).expect("Invalid offset");
+                    let size = u64::from_str_radix(size, 16).expect("Invalid offset");
+
+                    if address <= file_address && file_address < (address + size) {
+                        return address - offset;
+                    }
+                }
+            }
+        }
+
+        panic!("Could not find section load bias");
+    }
+
+    fn get_entry_point_offset(path: &Path) -> u64 {
+        let mut header = unsafe { mem::zeroed::<Elf64_Ehdr>() };
+        let p: *mut u8 = unsafe { mem::transmute(&mut header as *mut Elf64_Ehdr) };
+        let bytes = unsafe { std::slice::from_raw_parts_mut(p, mem::size_of::<Elf64_Ehdr>() ) };
+
+        {
+            let mut f = File::open(path).expect("Failed to open executable");
+            f.read_exact(bytes).expect("Failed to read entire ELF header");
+        }
+
+        let entry_file_address = header.e_entry;
+        entry_file_address - get_section_load_bias(path, entry_file_address)
+    }
+
+    fn get_load_address(pid: pid_t, offset: u64) -> VirtualAddress {
+        let re = Regex::new(r"(\w+)-\w+ ..(.). (\w+)").expect("Invalid map line regex");
+        let maps_file: PathBuf = ["/proc", pid.to_string().as_str(), "maps"].iter().collect();
+        let f = File::open(maps_file).expect("Failed to open maps file");
+        let mut reader = BufReader::new(f);
+
+        for line_result in reader.lines() {
+            if let Ok(line) = line_result {
+                if let Some(captures) = re.captures(line.as_str()) {
+                    let (_, [low_range, perm, file_offset]) = captures.extract();
+
+                    if perm == "x" {
+                        let low_range = u64::from_str_radix(low_range, 16).expect("Invalid low range");
+                        let file_offset = u64::from_str_radix(file_offset, 16).expect("Invalid file offset");
+                        let addr = offset - file_offset + low_range;
+                        return VirtualAddress::new(addr)
+                    }
+                }
+            }
+        }
+        panic!("Could not find load address");
     }
 
     #[test]
@@ -529,5 +649,145 @@ mod test {
             // TODO: figure out how to get the expected bytes for an 80-bit float
             //assert_eq!(expected_bytes, v, "Unexpected value for st0");
         }
+    }
+
+    #[test]
+    fn can_create_breakpoint_site_test() {
+        let mut proc = Process::launch("target/debug/run_endlessly", true, StdoutReplacement::None).expect("Failed to launch process");
+        let site_address = VirtualAddress::new(42);
+        let site = proc.create_breakpoint_site(site_address).expect("Failed to create breakpoint");
+
+        assert_eq!(site_address, site.address(), "Unexpected breakpoint address");
+    }
+
+    #[test]
+    fn breakpoint_site_ids_increase() {
+        let mut proc = Process::launch("target/debug/run_endlessly", true, StdoutReplacement::None).expect("Failed to launch process");
+
+        let (s1_id, s1_addr) = {
+            let s1 = proc.create_breakpoint_site(VirtualAddress::new(42)).expect("Failed to create breakpoint s1");
+            (s1.id(), s1.address())
+        };
+        assert_eq!(VirtualAddress::new(42), s1_addr);
+
+        let s2_id = {
+            let s2 = proc.create_breakpoint_site(VirtualAddress::new(43)).expect("Failed to create breakpoint s2");
+            s2.id()
+        };
+        assert_eq!(s2_id, s1_id + 1);
+
+        let s3_id = {
+            let s3 = proc.create_breakpoint_site(VirtualAddress::new(44)).expect("Failed to create breakpoint s3");
+            s3.id()
+        };
+        assert_eq!(s3_id, s1_id + 2);
+
+        let s4_id = {
+            let s4 = proc.create_breakpoint_site(VirtualAddress::new(45)).expect("Failed to create breakpoint s4");
+            s4.id()
+        };
+        assert_eq!(s4_id, s1_id + 3);
+    }
+
+    #[test]
+    fn can_find_breakpoint_site_test() {
+        let mut proc = Process::launch("target/debug/run_endlessly", true, StdoutReplacement::None).expect("Failed to launch process");
+
+        proc.create_breakpoint_site(VirtualAddress::new(42)).expect("Failed to create breakpoint 1");
+        proc.create_breakpoint_site(VirtualAddress::new(43)).expect("Failed to create breakpoint 2");
+        proc.create_breakpoint_site(VirtualAddress::new(44)).expect("Failed to create breakpoint 3");
+        proc.create_breakpoint_site(VirtualAddress::new(45)).expect("Failed to create breakpoint 4");
+
+        let s1 = proc.breakpoint_sites.get_by_address(VirtualAddress::new(44)).expect("Failed to get breakpoint site 1");
+        assert!(proc.breakpoint_sites().contains_address(VirtualAddress::new(44)), "Expected breakpoint to exist");
+        assert_eq!(VirtualAddress::new(44), s1.address());
+
+        // NOTE: c++ const tests ignored
+
+        let s2 = proc.breakpoint_sites().get_by_id(s1.id() + 1).expect("Failed to get breakpoint site 2");
+        assert!(proc.breakpoint_sites().contains_id(s1.id() + 1), "Expected breakpoint with id to exist");
+        assert_eq!(s2.id(), s1.id() + 1, "Unexpected id for breakpoint 2");
+        assert_eq!(VirtualAddress::new(45), s2.address(), "Unexpected address for breakpoint 2");
+
+        // NOTE: more const tests ignored
+    }
+
+    #[test]
+    fn cannot_find_breakpoint_site_test() {
+        let mut proc = Process::launch("target/debug/run_endlessly", true, StdoutReplacement::None).expect("Failed to create breakpoint site");
+
+        assert!(proc.breakpoint_sites().get_by_address(VirtualAddress::new(44)).is_err(), "Unexpected breakpoint at address");
+        assert!(proc.breakpoint_sites().get_by_id(44).is_err(), "Unexpected breakpoint with id");
+    }
+
+    #[test]
+    fn breakpoint_site_list_and_emptiness_test() {
+        let mut proc = Process::launch("target/debug/run_endlessly", true, StdoutReplacement::None).expect("Failed to launch process");
+
+        assert!(proc.breakpoint_sites().is_empty(), "Expected empty breakpoint list on launch");
+        assert_eq!(0, proc.breakpoint_sites().len(), "Expected zero length breakpoint list on launch");
+
+        proc.create_breakpoint_site(VirtualAddress::new(42)).expect("Failed to create first breakpoint site");
+        assert_eq!(false, proc.breakpoint_sites().is_empty(), "Expected non-empty breakpoint list after create");
+        assert_eq!(1, proc.breakpoint_sites().len(), "Expected singleton breakpoint list after create");
+
+        proc.create_breakpoint_site(VirtualAddress::new(43)).expect("Failed to create second breakpoint site");
+        assert_eq!(false, proc.breakpoint_sites.is_empty(), "Expected non-empty breakpoint list after second breakpoint created");
+        assert_eq!(2, proc.breakpoint_sites().len(), "Expected breakpoint list of length 2 after second breakpoint created");
+    }
+
+    #[test]
+    fn can_iterate_breakpoint_sites_test() {
+        let mut proc = Process::launch("target/debug/run_endlessly", true, StdoutReplacement::None).expect("Failed to launch process");
+
+        {
+            proc.create_breakpoint_site(VirtualAddress::new(42)).expect("Failed to create breakpoint site 1");
+            proc.create_breakpoint_site(VirtualAddress::new(43)).expect("Failed to create breakpoint site 2");
+            proc.create_breakpoint_site(VirtualAddress::new(44)).expect("Failed to create breakpoint site 3");
+            proc.create_breakpoint_site(VirtualAddress::new(45)).expect("Failed to create breakpoint site 4");
+        }
+
+        {
+            let mut addr = 42;
+            for site in proc.breakpoint_sites().iter() {
+                assert_eq!(VirtualAddress::new(addr), site.address(), "Unexpected breakpoint address");
+                addr += 1;
+            }
+        }
+    }
+
+    #[test]
+    fn breakpoint_on_address_test() {
+        let close_on_exec = false;
+        let mut channel = Pipe::create(close_on_exec).expect("Failed to create pipe");
+        let exec_path = "target/debug/hello_rsdb";
+
+        let mut proc = Process::launch(exec_path, true, StdoutReplacement::Fd(channel.write_fd())).expect("Failed to launch process");
+        channel.close_write();
+
+        let offset = get_entry_point_offset(Path::new(exec_path));
+        let load_address = get_load_address(proc.pid(), offset);
+
+        let bp = proc.create_breakpoint_site(load_address).expect("Failed to create breakpoint");
+        bp.enable().expect("Failed to enable breakpoint");
+        proc.resume().expect("Failed to resume");
+        let reason = proc.wait_on_signal().expect("Failed to wait");
+
+        assert!(reason.reason.is_stopped(), "Unexpected stop reason");
+        assert_eq!(reason.info, SIGTRAP, "Unexpected stop info");
+        assert_eq!(proc.get_pc(), load_address, "Unexpected program counter");
+
+        proc.resume().expect("Failed to resume");
+        let reason = proc.wait_on_signal().expect("Failed to wait after resume");
+
+        assert_eq!(reason.reason, ProcessState::Exited, "Unexpected wait reason after resume");
+        assert_eq!(reason.info, 0, "Unexpected wait info after resume");
+
+        let data = {
+            let mut s = String::new();
+            channel.read_to_string(&mut s).expect("Failed to read from pipe");
+            s
+        };
+        assert_eq!("Hello, rsdb!\n", data, "Unexpected output");
     }
 }
