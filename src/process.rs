@@ -256,14 +256,7 @@ impl Process {
     }
 
     pub fn wait_on_signal(&mut self) -> Result<StopReason, Error> {
-        let wait_status = {
-            let mut status = -1;
-            let options = 0;
-            if unsafe { waitpid(self.pid, &mut status, options) } < 0 {
-                return Err(Error::from_errno("waitpid failed"));
-            }
-            status
-        };
+        let wait_status = interop::wait_pid(self.pid, 0)?;
         let mut stop_reason = StopReason::from_status(wait_status);
 
         if self.is_attached && stop_reason.reason.is_stopped() {
