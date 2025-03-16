@@ -380,8 +380,11 @@ impl Drop for Process {
 mod test {
     use std::io::{self, BufReader, BufRead};
     use std::fs::File;
-    use std::path::{PathBuf};
-    use libc::{ESRCH};
+    use std::mem;
+    use std::path::{Path, PathBuf};
+    use std::process::{Command};
+    use libc::{ESRCH, Elf64_Addr, Elf64_Ehdr};
+    use regex::Regex;
     use super::*;
     use crate::error::{errno};
     use crate::register::*;
@@ -409,6 +412,71 @@ mod test {
         // NOTE: rfind returns a byte index
         let status_indicator_index = proc_name_end + 2;
         Ok(line.as_bytes()[status_indicator_index] as char)
+    }
+
+    fn get_section_load_bias(path: &Path, file_address: Elf64_Addr) -> u64 {
+        let output = Command::new("readelf")
+            .args(["-W", "-S"])
+            .arg(path)
+            .output()
+            .expect("Failed to execute readelf");
+
+        let re = Regex::new(r"PROGBITS\s+(\w+)\s+(\w+)\s+(\w+)").expect("Invalid regex");
+
+        // iterate over stdout
+        for line_result in BufReader::new(output.stdout.as_slice()).lines() {
+            if let Ok(line) = line_result {
+                if let Some(captures) = re.captures(line.as_str()) {
+                    let (_, [address, offset, size]) = captures.extract();
+                    let address = u64::from_str_radix(address, 16).expect("Invalid address");
+                    let offset = u64::from_str_radix(offset, 16).expect("Invalid offset");
+                    let size = u64::from_str_radix(size, 16).expect("Invalid offset");
+
+                    if address <= file_address && file_address < (address + size) {
+                        return address - offset;
+                    }
+                }
+            }
+        }
+
+        panic!("Could not find section load bias");
+    }
+
+    fn get_entry_point_offset(path: &Path) -> u64 {
+        let mut header = unsafe { mem::zeroed::<Elf64_Ehdr>() };
+        let p: *mut u8 = unsafe { mem::transmute(&mut header as *mut Elf64_Ehdr) };
+        let bytes = unsafe { std::slice::from_raw_parts_mut(p, mem::size_of::<Elf64_Ehdr>() ) };
+
+        {
+            let mut f = File::open(path).expect("Failed to open executable");
+            f.read_exact(bytes).expect("Failed to read entire ELF header");
+        }
+
+        let entry_file_address = header.e_entry;
+        entry_file_address - get_section_load_bias(path, entry_file_address)
+    }
+
+    fn get_load_address(pid: pid_t, offset: u64) -> VirtualAddress {
+        let re = Regex::new(r"(\w+)-\w+ ..(.). (\w+)").expect("Invalid map line regex");
+        let maps_file: PathBuf = ["/proc", pid.to_string().as_str(), "maps"].iter().collect();
+        let f = File::open(maps_file).expect("Failed to open maps file");
+        let mut reader = BufReader::new(f);
+
+        for line_result in reader.lines() {
+            if let Ok(line) = line_result {
+                if let Some(captures) = re.captures(line.as_str()) {
+                    let (_, [low_range, perm, file_offset]) = captures.extract();
+
+                    if perm == "x" {
+                        let low_range = u64::from_str_radix(low_range, 16).expect("Invalid low range");
+                        let file_offset = u64::from_str_radix(file_offset, 16).expect("Invalid file offset");
+                        let addr = offset - file_offset + low_range;
+                        return VirtualAddress::new(addr)
+                    }
+                }
+            }
+        }
+        panic!("Could not find load address");
     }
 
     #[test]
@@ -686,5 +754,40 @@ mod test {
                 addr += 1;
             }
         }
+    }
+
+    #[test]
+    fn breakpoint_on_address_test() {
+        let close_on_exec = false;
+        let mut channel = Pipe::create(close_on_exec).expect("Failed to create pipe");
+        let exec_path = "target/debug/hello_rsdb";
+
+        let mut proc = Process::launch(exec_path, true, StdoutReplacement::Fd(channel.write_fd())).expect("Failed to launch process");
+        channel.close_write();
+
+        let offset = get_entry_point_offset(Path::new(exec_path));
+        let load_address = get_load_address(proc.pid(), offset);
+
+        let bp = proc.create_breakpoint_site(load_address).expect("Failed to create breakpoint");
+        bp.enable().expect("Failed to enable breakpoint");
+        proc.resume().expect("Failed to resume");
+        let reason = proc.wait_on_signal().expect("Failed to wait");
+
+        assert!(reason.reason.is_stopped(), "Unexpected stop reason");
+        assert_eq!(reason.info, SIGTRAP, "Unexpected stop info");
+        assert_eq!(proc.get_pc(), load_address, "Unexpected program counter");
+
+        proc.resume().expect("Failed to resume");
+        let reason = proc.wait_on_signal().expect("Failed to wait after resume");
+
+        assert_eq!(reason.reason, ProcessState::Exited, "Unexpected wait reason after resume");
+        assert_eq!(reason.info, 0, "Unexpected wait info after resume");
+
+        let data = {
+            let mut s = String::new();
+            channel.read_to_string(&mut s).expect("Failed to read from pipe");
+            s
+        };
+        assert_eq!("Hello, rsdb!\n", data, "Unexpected output");
     }
 }

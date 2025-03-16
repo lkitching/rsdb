@@ -11,6 +11,9 @@ libc = "0.2"
 rustyline = "15.0"
 registers-macro = { path = "./registers-macro" }
 
+[dev-dependencies]
+regex = "1.11.1"
+
 [lib]
 name = "librsdb"
 path = "src/lib.rs"
