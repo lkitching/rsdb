@@ -12,7 +12,7 @@ use libc::{c_int, waitpid, kill, SIGSTOP, SIGCONT, WEXITSTATUS, WTERMSIG, WIFSTO
 
 use crate::error::{Error};
 use crate::interop;
-use crate::interop::ptrace;
+use crate::interop::{ptrace, ForkResult};
 use crate::pipe::Pipe;
 use crate::process::PIDParseError::OutOfRange;
 use crate::register::{RegisterId, Registers};
@@ -162,63 +162,58 @@ impl Process {
         // create pipe to communicate with child process
         let mut pipe = Pipe::create(true)?;
 
-        let pid = unsafe { fork() };
-        if pid < 0 {
-            return Err(Error::from_errno("fork failed"))
-        }
+        match interop::fork()? {
+            ForkResult::InChild => {
+                //close read side of pipe
+                pipe.close_read();
 
-        if pid == 0 {
-            // in child process
-
-            //close read side of pipe
-            pipe.close_read();
-
-            // replace stdout with given file hande if specified
-            if let StdoutReplacement::Fd(fd) = stdout_replacement {
-                if let Err(e) = interop::dup2(fd, STDOUT_FILENO) {
-                    let e = e.with_context("stdout replacement failed");
-                    exit_with_perror(&mut pipe, e);
+                // replace stdout with given file hande if specified
+                if let StdoutReplacement::Fd(fd) = stdout_replacement {
+                    if let Err(e) = interop::dup2(fd, STDOUT_FILENO) {
+                        let e = e.with_context("stdout replacement failed");
+                        exit_with_perror(&mut pipe, e);
+                    }
                 }
-            }
 
-            // configure debugging if required
-            if debug {
-                if let Err(e) = ptrace::traceme() {
-                    exit_with_perror(&mut pipe, e);
+                // configure debugging if required
+                if debug {
+                    if let Err(e) = ptrace::traceme() {
+                        exit_with_perror(&mut pipe, e);
+                    }
                 }
+
+                // execute debuggee
+                if let Err(e) = interop::execlp0(path) {
+                    exit_with_perror(&mut pipe, e)
+                }
+
+                // if execlp succeeds then this line should not be reached
+                unreachable!()
+            },
+            ForkResult::InParent(pid) => {
+                pipe.close_write();
+
+                // wait for child process to write to pipe
+                // pipe is closed on exec so this will be empty if exec succeeds
+                // otherwise an error message should be written by the child
+                let mut msg = String::new();
+                let bytes_written = pipe.read_to_string(&mut msg)?;
+
+                if bytes_written > 0 {
+                    // wait for child to exit
+                    unsafe { waitpid(pid, ptr::null_mut(), 0); }
+                    return Err(Error::from_message(msg));
+                }
+
+                // create handle for child proces and wait if debugging
+                let mut proc = Self { pid, state: ProcessState::stopped(), terminate_on_end: true, is_attached: debug, registers: Registers::new(pid), breakpoint_sites: StopPointCollection::new() };
+
+                if debug {
+                    proc.wait_on_signal()?;
+                }
+
+                Ok(proc)
             }
-
-            // execute debuggee
-            if let Err(e) = interop::execlp0(path) {
-                exit_with_perror(&mut pipe, e)
-            }
-
-            // if execlp succeeds then this line should not be reached
-            unreachable!()
-        } else {
-            // in parent
-            pipe.close_write();
-
-            // wait for child process to write to pipe
-            // pipe is closed on exec so this will be empty if exec succeeds
-            // otherwise an error message should be written by the child
-            let mut msg = String::new();
-            let bytes_written = pipe.read_to_string(&mut msg)?;
-
-            if bytes_written > 0 {
-                // wait for child to exit
-                unsafe { waitpid(pid, ptr::null_mut(), 0); }
-                return Err(Error::from_message(msg));
-            }
-
-            // create handle for child proces and wait if debugging
-            let mut proc = Self { pid, state: ProcessState::stopped(), terminate_on_end: true, is_attached: debug, registers: Registers::new(pid), breakpoint_sites: StopPointCollection::new() };
-
-            if debug {
-                proc.wait_on_signal()?;
-            }
-
-            Ok(proc)
         }
     }
 
