@@ -276,6 +276,28 @@ impl Process {
         Ok(stop_reason)
     }
 
+    pub fn step_instruction(&mut self) -> Result<StopReason, Error> {
+        let pc = self.get_pc();
+        let at_breakpoint = self.breakpoint_sites().enabled_stoppoint_at_address(pc);
+
+        if at_breakpoint {
+            // disable breakpoint at address
+            let bp = self.breakpoint_sites_mut().get_by_address_mut(pc)?;
+            bp.disable()?;
+        }
+
+        ptrace::single_step(self.pid)?;
+        let reason = self.wait_on_signal()?;
+
+        // re-enable breakpoint if required
+        if at_breakpoint {
+            let bp = self.breakpoint_sites_mut().get_by_address_mut(pc)?;
+            bp.enable()?;
+        }
+
+        Ok(reason)
+    }
+
     fn read_all_registers(&mut self) -> Result<(), Error> {
         self.registers.read_all()
     }

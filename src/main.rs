@@ -71,8 +71,10 @@ fn print_help(args: &[&str]) {
     match args.first() {
         None => {
             eprintln!("Available commands:");
+            eprintln!("  breakpoint - Commands for operating on breakpoints");
             eprintln!("  continue   - Resume the process");
             eprintln!("  register   - Commands for operating on registers");
+            eprintln!("  step       - Step over a single instruction")
         },
         Some(s) if "register".starts_with(s) => {
             eprintln!("Available commands:");
@@ -238,6 +240,10 @@ fn handle_command(process: &mut Process, line: &str) -> Result<(), DebuggerError
         Ok(())
     } else if "breakpoint".starts_with(command) {
         handle_breakpoint_command(command_args.as_slice(), process)?;
+        Ok(())
+    } else if "step".starts_with(command) {
+        let reason = process.step_instruction()?;
+        print_stop_reason(process, &reason);
         Ok(())
     }
     else if "help".starts_with(command) {
