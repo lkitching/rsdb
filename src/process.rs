@@ -7,7 +7,7 @@ use std::num::ParseIntError;
 use std::io::{Read, Write};
 use std::os::fd::{RawFd};
 
-use libc::{pid_t, WIFEXITED, WIFSIGNALED, SIGKILL, STDOUT_FILENO, ADDR_NO_RANDOMIZE};
+use libc::{pid_t, WIFEXITED, WIFSIGNALED, SIGKILL, STDOUT_FILENO, ADDR_NO_RANDOMIZE, SIGTRAP};
 use libc::{c_int, waitpid, kill, SIGSTOP, SIGCONT, WEXITSTATUS, WTERMSIG, WIFSTOPPED, WSTOPSIG, strsignal};
 
 use crate::error::{Error};
@@ -234,6 +234,22 @@ impl Process {
     }
 
     pub fn resume(&mut self) -> Result<(), Error> {
+        // if we're at a breakpoint we need to disable the breakpoint, step over it to the next
+        // instruction and then re-enable
+        let pc = self.get_pc();
+        if self.breakpoint_sites.enabled_stoppoint_at_address(pc) {
+            let pid = self.pid;
+            let bp = self.breakpoint_sites_mut().get_by_address_mut(pc)?;
+
+            // disable breakpoint and step over
+            bp.disable()?;
+            ptrace::single_step(pid)?;
+            let _wait_status = interop::wait_pid(pid, 0)?;
+
+            // re-enable breakpoint
+            bp.enable()?;
+        }
+
         ptrace::cont(self.pid)?;
         self.state = ProcessState::Running;
         Ok(())
@@ -255,6 +271,12 @@ impl Process {
             self.read_all_registers()?;
             let pc = self.get_pc();
             stop_reason.reason.set_pc(pc);
+
+            // update program counter to point to breakpoint if it's the next instruction
+            let instr_begin = pc - 1;
+            if stop_reason.info == SIGTRAP && self.breakpoint_sites().enabled_stoppoint_at_address(instr_begin) {
+                self.set_pc(instr_begin)?;
+            }
         }
 
         self.state = stop_reason.reason;
@@ -283,6 +305,10 @@ impl Process {
 
     pub fn get_pc(&self) -> VirtualAddress {
         self.registers.get_pc()
+    }
+
+    pub fn set_pc(&mut self, addr: VirtualAddress) -> Result<(), Error> {
+        self.registers.write_by_id(RegisterId::rip, addr)
     }
 
     pub fn create_breakpoint_site(&mut self, address: VirtualAddress) -> Result<&mut BreakpointSite, Error> {

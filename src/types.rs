@@ -443,6 +443,13 @@ impl From<VirtualAddress> for u64 {
     fn from(addr: VirtualAddress) -> Self { addr.addr }
 }
 
+impl From<VirtualAddress> for Value {
+    fn from(addr: VirtualAddress) -> Self {
+        let addr_raw: u64 = addr.into();
+        Self::from(addr_raw)
+    }
+}
+
 impl Add<i64> for VirtualAddress {
     type Output = Self;
     fn add(self, rhs: i64) -> Self {

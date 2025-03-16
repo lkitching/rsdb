@@ -28,6 +28,7 @@ pub enum ForkResult {
     InParent(pid_t),
     InChild
 }
+
 pub fn fork() -> Result<ForkResult, Error> {
     let pid = unsafe { libc::fork() };
     if pid < 0 {
@@ -48,5 +49,14 @@ pub fn personality(persona: c_int) -> Result<(), Error> {
         Err(Error::from_errno("Failed to set personality"))
     } else {
         Ok(())
+    }
+}
+
+pub fn wait_pid(pid: pid_t, options: c_int) -> Result<c_int, Error> {
+    let mut status = -1;
+    if unsafe { libc::waitpid(pid, &mut status, options) } < 0 {
+        Err(Error::from_errno("waitpid failed"))
+    } else {
+        Ok(status)
     }
 }

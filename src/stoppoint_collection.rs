@@ -52,6 +52,10 @@ impl <S : StopPoint> StopPointCollection<S> {
         self.find_by_address(address).ok_or_else(|| Error::from_message(String::from("Stoppoint with given address not found")))
     }
 
+    pub fn get_by_address_mut(&mut self, address: VirtualAddress) -> Result<&mut S, Error> {
+        self.find_by_address_mut(address).ok_or_else(|| Error::from_message(String::from("Stoppoint with given address not found")))
+    }
+
     pub fn remove_by_id(&mut self, id: S::IdType) {
         if let Some((idx, _sp)) = self.find_indexed_by_id(id) {
             self.remove_by_index(idx);
@@ -84,6 +88,10 @@ impl <S : StopPoint> StopPointCollection<S> {
 
     fn find_by_address(&self, address: VirtualAddress) -> Option<&S> {
         self.find_indexed_by_address(address).map(|(_idx, sp)| sp)
+    }
+
+    fn find_by_address_mut(&mut self, address: VirtualAddress) -> Option<&mut S> {
+        self.stop_points.iter_mut().find(|sp| sp.at_address(address))
     }
 
     fn find_indexed_by_address(&self, address: VirtualAddress) -> Option<(usize, &S)> {

@@ -1,6 +1,6 @@
 use std::{mem, ptr};
 
-use libc::{c_void, pid_t, user_fpregs_struct, user_regs_struct, c_long, size_t};
+use libc::{c_void, pid_t, user_fpregs_struct, user_regs_struct, c_long, size_t, PTRACE_SINGLESTEP};
 use libc::{ptrace, PTRACE_TRACEME, PTRACE_ATTACH, PTRACE_CONT, PTRACE_DETACH, PTRACE_GETREGS, PTRACE_GETFPREGS, PTRACE_PEEKUSER, PTRACE_POKEUSER, PTRACE_SETREGS, PTRACE_SETFPREGS};
 use libc::{PTRACE_PEEKDATA, PTRACE_POKEDATA};
 use crate::error::*;
@@ -105,6 +105,14 @@ pub fn poke_data(pid: pid_t, address: VirtualAddress, word: usize) -> Result<(),
     let address: u64 = address.into();
     if unsafe { ptrace(PTRACE_POKEDATA, pid, address as *const u64 as *const c_void, word as *const c_void) } < 0 {
         Err(Error::from_errno("Failed to write data"))
+    } else {
+        Ok(())
+    }
+}
+
+pub fn single_step(pid: pid_t) -> Result<(), Error> {
+    if unsafe { ptrace(PTRACE_SINGLESTEP, pid, ptr::null::<c_void>(), ptr::null::<c_void>()) } < 0 {
+        Err(Error::from_errno("Failed to single step"))
     } else {
         Ok(())
     }
