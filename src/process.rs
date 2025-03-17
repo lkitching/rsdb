@@ -790,4 +790,18 @@ mod test {
         };
         assert_eq!("Hello, rsdb!\n", data, "Unexpected output");
     }
+
+    #[test]
+    fn can_remove_breakpoint_sites() {
+        let mut proc = Process::launch("target/debug/hello_rsdb", true, StdoutReplacement::None).expect("Failed to launch process");
+
+        let bp1 = proc.create_breakpoint_site(VirtualAddress::new(42)).expect("Failed to create breakpoint site 1");
+        let bp1_id = bp1.id();
+        proc.create_breakpoint_site(VirtualAddress::new(43)).expect("Failed to create breakpoint site 2");
+        assert_eq!(2, proc.breakpoint_sites().len(), "Unexpected number of breakpoints after create");
+
+        proc.breakpoint_sites_mut().remove_by_id(bp1_id);
+        proc.breakpoint_sites_mut().remove_by_address(VirtualAddress::new(43));
+        assert!(proc.breakpoint_sites().is_empty(), "Expected breakpoints to be removed");
+    }
 }
