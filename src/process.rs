@@ -1,3 +1,4 @@
+use std::cmp::{min};
 use std::fmt;
 use std::str::{FromStr};
 use std::ptr;
@@ -7,8 +8,8 @@ use std::num::ParseIntError;
 use std::io::{Read, Write};
 use std::os::fd::{RawFd};
 
-use libc::{pid_t, WIFEXITED, WIFSIGNALED, SIGKILL, STDOUT_FILENO, ADDR_NO_RANDOMIZE, SIGTRAP};
-use libc::{c_int, waitpid, kill, SIGSTOP, SIGCONT, WEXITSTATUS, WTERMSIG, WIFSTOPPED, WSTOPSIG, strsignal};
+use libc::{pid_t, WIFEXITED, WIFSIGNALED, SIGKILL, STDOUT_FILENO, ADDR_NO_RANDOMIZE, SIGTRAP, process_vm_readv};
+use libc::{c_int, waitpid, kill, SIGSTOP, SIGCONT, WEXITSTATUS, WTERMSIG, WIFSTOPPED, WSTOPSIG, strsignal, iovec, c_void, c_ulong};
 
 use crate::error::{Error};
 use crate::interop;
@@ -337,6 +338,44 @@ impl Process {
 
     pub fn breakpoint_sites(&self) -> &StopPointCollection<BreakpointSite> { &self.breakpoint_sites }
     pub fn breakpoint_sites_mut(&mut self) -> &mut StopPointCollection<BreakpointSite> { &mut self.breakpoint_sites }
+
+    pub fn read_memory(&self, address: VirtualAddress, num_bytes: usize) -> Result<Vec<u8>, Error> {
+        let mut ret = vec![0u8; num_bytes];
+        let local_desc = iovec { iov_base: ret.as_mut_ptr() as *mut c_void, iov_len: ret.len() };
+
+        let mut remaining = num_bytes;
+        let mut current_address = address;
+        let mut remote_descs = Vec::new();
+
+        while remaining > 0 {
+            let up_to_next_page = 0x1000 - (address.addr() & 0xFFF);
+            let chunk_size = min(remaining, up_to_next_page);
+
+            remote_descs.push(iovec { iov_base: address.addr() as *mut c_void, iov_len: chunk_size });
+
+            remaining -= chunk_size;
+            current_address += chunk_size as isize;
+        }
+
+        let result = unsafe { process_vm_readv(
+            self.pid,
+            &local_desc,
+            1,
+            remote_descs.as_ptr(),
+            remote_descs.len() as c_ulong,
+            0
+        )};
+
+        if result < 0 {
+            Err(Error::from_errno("Could not read process memory"))
+        } else {
+            Ok(ret)
+        }
+    }
+
+    pub fn write_memory(&mut self, address: VirtualAddress, data: &[u8]) -> Result<(), Error> {
+        unimplemented!()
+    }
 }
 
 impl Drop for Process {

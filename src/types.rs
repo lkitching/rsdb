@@ -454,6 +454,7 @@ impl VirtualAddress {
     pub fn new(addr: usize) -> Self {
         Self { addr }
     }
+    pub fn addr(&self) -> usize { self.addr }
 }
 
 impl From<usize> for VirtualAddress {
