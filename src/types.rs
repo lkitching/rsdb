@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, mem};
 use std::fmt::Formatter;
 use std::num::ParseIntError;
 use std::ops::{Add, Sub, AddAssign, SubAssign};
@@ -154,6 +154,29 @@ derive_value_from!(f64, F64);
 derive_value_from!(f128, F128);
 derive_value_from!(Byte64, Byte64);
 derive_value_from!(Byte128, Byte128);
+
+impl TryFrom<Value> for usize {
+    type Error = RegisterValueError;
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match size_of::<usize>() {
+            4 => {
+                if let Value::U32(n) = value {
+                    Ok(n as usize)
+                } else {
+                    Err(RegisterValueError)
+                }
+            },
+            8 => {
+                if let Value::U64(n) = value {
+                    Ok(n as usize)
+                } else {
+                    Err(RegisterValueError)
+                }
+            },
+            other => panic!("Unexpected size {} for usize", other)
+        }
+    }
+}
 
 pub unsafe trait FromBytesRaw {
     unsafe fn from_bytes_raw(bytes: *const u8) -> Self;
@@ -424,68 +447,71 @@ impl TryWiden for Value {
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct VirtualAddress {
-    addr: u64
+    addr: usize
 }
 
 impl VirtualAddress {
-    pub fn new(addr: u64) -> Self {
+    pub fn new(addr: usize) -> Self {
         Self { addr }
     }
 }
 
-impl From<u64> for VirtualAddress {
-    fn from(addr: u64) -> Self {
+impl From<usize> for VirtualAddress {
+    fn from(addr: usize) -> Self {
         Self::new(addr)
     }
 }
 
-impl From<VirtualAddress> for u64 {
+impl From<VirtualAddress> for usize {
     fn from(addr: VirtualAddress) -> Self { addr.addr }
 }
 
 impl From<VirtualAddress> for Value {
     fn from(addr: VirtualAddress) -> Self {
-        let addr_raw: u64 = addr.into();
-        Self::from(addr_raw)
+        match size_of::<usize>() {
+            4 => Self::U32(addr.addr as u32),
+            8 => Self::U64(addr.addr as u64),
+            other => panic!("Unexpected size {} for usize", other)
+        }
     }
 }
 
-impl Add<i64> for VirtualAddress {
+impl Add<isize> for VirtualAddress {
     type Output = Self;
-    fn add(self, rhs: i64) -> Self {
+    fn add(self, rhs: isize) -> Self {
         let addr = if rhs < 0 {
-            self.addr - rhs.abs() as u64
+            self.addr - rhs.abs() as usize
         } else {
-            self.addr + rhs as u64
+            self.addr + rhs as usize
         };
 
         Self::new(addr)
     }
 }
 
-impl AddAssign<i64> for VirtualAddress {
-    fn add_assign(&mut self, rhs: i64) {
+impl AddAssign<isize> for VirtualAddress {
+    fn add_assign(&mut self, rhs: isize) {
         let r = *self + rhs;
         *self = r;
     }
 }
 
-impl Sub<i64> for VirtualAddress {
+impl Sub<isize> for VirtualAddress {
     type Output = Self;
 
-    fn sub(self, rhs: i64) -> Self::Output {
+    fn sub(self, rhs: isize) -> Self::Output {
         let addr = if rhs >= 0 {
-            self.addr - rhs as u64
+            self.addr - rhs as usize
         } else {
-            self.addr + rhs.abs() as u64
+            self.addr + rhs.abs() as usize
         };
 
         Self::new(addr)
     }
 }
 
-impl SubAssign<i64> for VirtualAddress {
-    fn sub_assign(&mut self, rhs: i64) {
+impl SubAssign<isize> for VirtualAddress {
+    fn sub_assign(&mut self, rhs: isize) {
         let r = *self - rhs;
         *self = r;
     }
@@ -507,7 +533,7 @@ impl FromStr for VirtualAddress {
             s
         };
 
-        let addr = u64::from_str_radix(num_str, 16)?;
+        let addr = usize::from_str_radix(num_str, 16)?;
         Ok(Self { addr })
     }
 }

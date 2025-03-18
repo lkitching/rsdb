@@ -91,8 +91,8 @@ pub fn poke_user(pid: pid_t, offset: size_t, word: usize) -> Result<(), Error> {
 
 pub fn peek_data(pid: pid_t, address: VirtualAddress) -> Result<usize, Error> {
     set_errno(0);
-    let address: u64 = address.into();
-    let data = unsafe { ptrace(PTRACE_PEEKDATA, pid, address as *const u64 as *const c_void, ptr::null::<c_void>()) };
+    let address: usize = address.into();
+    let data = unsafe { ptrace(PTRACE_PEEKDATA, pid, address as *const c_void, ptr::null::<c_void>()) };
     if errno() != 0 {
         Err(Error::from_errno("Could not read data"))
     } else {
@@ -102,8 +102,8 @@ pub fn peek_data(pid: pid_t, address: VirtualAddress) -> Result<usize, Error> {
 }
 
 pub fn poke_data(pid: pid_t, address: VirtualAddress, word: usize) -> Result<(), Error> {
-    let address: u64 = address.into();
-    if unsafe { ptrace(PTRACE_POKEDATA, pid, address as *const u64 as *const c_void, word as *const c_void) } < 0 {
+    let address: usize = address.into();
+    if unsafe { ptrace(PTRACE_POKEDATA, pid, address as *const c_void, word as *const c_void) } < 0 {
         Err(Error::from_errno("Failed to write data"))
     } else {
         Ok(())

@@ -471,7 +471,7 @@ mod test {
                         let low_range = u64::from_str_radix(low_range, 16).expect("Invalid low range");
                         let file_offset = u64::from_str_radix(file_offset, 16).expect("Invalid file offset");
                         let addr = offset - file_offset + low_range;
-                        return VirtualAddress::new(addr)
+                        return VirtualAddress::new(addr as usize)
                     }
                 }
             }
