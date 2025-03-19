@@ -29,3 +29,7 @@ path = "src/support/run_endlessly.rs"
 [[bin]]
 name = "end_immediately"
 path = "src/support/end_immediately.rs"
+
+[[bin]]
+name = "memory"
+path = "src/support/memory.rs"

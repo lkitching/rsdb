@@ -867,4 +867,51 @@ mod test {
         proc.breakpoint_sites_mut().remove_by_address(VirtualAddress::new(43));
         assert!(proc.breakpoint_sites().is_empty(), "Expected breakpoints to be removed");
     }
+
+    #[test]
+    fn reading_and_writing_memory_test() -> Result<(), Error> {
+        let close_on_exec = false;
+        let mut channel = Pipe::create(close_on_exec)?;
+
+        let mut proc = Process::launch("target/debug/memory", true, StdoutReplacement::Fd(channel.write_fd()))?;
+        channel.close_write();
+
+        proc.resume()?;
+        proc.wait_on_signal()?;
+
+        // debugee should have written pointer to stdout
+        let mut ptr_bytes = [0u8; 8];
+        channel.read_exact(&mut ptr_bytes)?;
+        let ptr = usize::try_from_bytes(ptr_bytes.as_slice()).expect("Failed to read pointer");
+
+        let bytes = proc.read_memory(VirtualAddress::new(ptr), 8)?;
+        let word = u64::try_from_bytes(bytes.as_slice()).expect("Failed to read word");
+
+        assert_eq!(0xcafecafe, word, "Unexpected value for word");
+
+        proc.resume()?;
+        proc.wait_on_signal()?;
+
+        let message = "Hello, rsdb!";
+
+        let str_ptr = {
+            // debuggee should have written address of string to write to stdout`
+            let mut ptr_bytes = [0u8; 8];
+            channel.read_exact(&mut ptr_bytes)?;
+            usize::try_from_bytes(ptr_bytes.as_slice()).expect("Failed to read pointer")
+        };
+
+        proc.write_memory(VirtualAddress::new(str_ptr), message.as_bytes())?;
+
+        proc.resume()?;
+        proc.wait_on_signal()?;
+
+        // debuggee should have written the previous message to stdout
+        let mut written = String::with_capacity(message.len());
+        channel.read_to_string(&mut written)?;
+
+        assert_eq!(message, written, "Unexpected message after memory write");
+
+        Ok(())
+    }
 }
