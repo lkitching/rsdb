@@ -74,7 +74,8 @@ fn print_help(args: &[&str]) {
             eprintln!("  breakpoint - Commands for operating on breakpoints");
             eprintln!("  continue   - Resume the process");
             eprintln!("  register   - Commands for operating on registers");
-            eprintln!("  step       - Step over a single instruction")
+            eprintln!("  step       - Step over a single instruction");
+            eprintln!("  memory     - Commands for operating on memory")
         },
         Some(s) if "register".starts_with(s) => {
             eprintln!("Available commands:");
@@ -90,6 +91,12 @@ fn print_help(args: &[&str]) {
             eprintln!("  disable <id>");
             eprintln!("  enable <id>");
             eprintln!("  set <address>");
+        }
+        Some(s) if "memory".starts_with(s) => {
+            eprintln!("Available commands:");
+            eprintln!("  read <address>");
+            eprintln!("  read <address> <num_bytes>");
+            eprintln!("  write <address> <bytes>");
         }
         Some(_s) => {
             eprintln!("No help available on that");
@@ -239,7 +246,7 @@ fn handle_memory_read_command(args: &[&str], process: &mut Process) -> Result<()
     // display data in 16-byte chunks
     let mut chunk_address = addr;
     for chunk in data.chunks(16) {
-        let bytes: Vec<String> = chunk.iter().map(|b| format!("{b:x}")).collect();
+        let bytes: Vec<String> = chunk.iter().map(|b| format!("{b:02x}")).collect();
         println!("{}: {}", chunk_address, bytes.join(" "));
         chunk_address += chunk.len() as isize;
     }
@@ -248,7 +255,16 @@ fn handle_memory_read_command(args: &[&str], process: &mut Process) -> Result<()
 }
 
 fn handle_memory_write_command(args: &[&str], process: &mut Process) -> Result<(), DebuggerError> {
-    unimplemented!()
+    if args.len() != 2 {
+        print_help(["memory"].as_slice());
+        return Ok(())
+    }
+
+    let addr: VirtualAddress = parse::to_integral(&args[0], 16).map_err(|e| DebuggerError::InvalidCommand(format!("Invalid address: {}", e)))?;
+    let data = parse::parse_vector(&args[1]).map_err(|e| DebuggerError::InvalidCommand(format!("Invalid data format: {}", e)))?;
+
+    process.write_memory(addr, data.as_slice())?;
+    Ok(())
 }
 
 fn handle_memory_command(args: &[&str], process: &mut Process) -> Result<(), DebuggerError> {

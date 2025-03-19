@@ -16,6 +16,12 @@ pub struct ParseVectorError {
     error: String
 }
 
+impl fmt::Display for ParseVectorError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "Invalid vector - {}", self.error)
+    }
+}
+
 impl From<ParseFloatError> for ValueParseError {
     fn from(e: ParseFloatError) -> Self {
         Self::InvalidFloat(e)
@@ -87,26 +93,20 @@ pub fn to_integral<I: FromStrRadix>(s: &str, radix: u32) -> Result<I, ParseIntEr
     }
 }
 
-fn parse_vector<const N: usize>(s: &str) -> Result<[u8; N], ParseVectorError> {
+pub fn parse_vector(s: &str) -> Result<Vec<u8>, ParseVectorError> {
     if !s.starts_with("[") || !s.ends_with("]") {
-        return Err(ParseVectorError { error: String::from("Invalid vector format - expected [byte, byte,...,byte]")});
+        return Err(ParseVectorError { error: String::from("Expected [byte, byte,...,byte]")});
     }
 
     let s = &s[1..s.len() - 1].trim();
     let digits = s.split(",").map(|ds| ds.trim());
 
-    let mut bytes = [0u8; N];
-    let mut i = 0;
+    let mut bytes = Vec::new();
 
     for digit in digits {
-        if i >= N {
-            return Err(ParseVectorError { error: format!("Invalid vector - expected at most {} bytes", N) });
-        }
-
         match to_integral(digit, 16) {
             Ok(b) => {
-                bytes[i] = b;
-                i += 1;
+                bytes.push(b);
             },
             Err(_e) => {
                 return Err(ParseVectorError { error: format!("Invalid byte {}", digit) });
@@ -114,13 +114,15 @@ fn parse_vector<const N: usize>(s: &str) -> Result<[u8; N], ParseVectorError> {
         }
     }
 
-    if i != N {
-        return Err(ParseVectorError { error: format!("Invalid vector - expected {} bytes, got {}", N, i) });
-    }
-
     Ok(bytes)
 }
 
+fn parse_array<const N: usize>(s: &str) -> Result<[u8; N], ParseVectorError> {
+    let vec = parse_vector(s)?;
+    let len = vec.len();
+
+    vec.try_into().map_err(|e| ParseVectorError { error: format!("Expected {} bytes but got {}", N, len) })
+}
 
 pub fn parse_register_value(info: &RegisterInfo, s: &str) -> Result<Value, ValueParseError> {
     match info.format {
@@ -160,11 +162,11 @@ pub fn parse_register_value(info: &RegisterInfo, s: &str) -> Result<Value, Value
         RegisterFormat::Vector => {
             match info.size {
                 8 => {
-                    let bytes = parse_vector::<8>(s)?;
+                    let bytes = parse_array::<8>(s)?;
                     Ok(Byte64::from_le_bytes(bytes).into())
                 },
                 16 => {
-                    let bytes = parse_vector::<16>(s)?;
+                    let bytes = parse_array::<16>(s)?;
                     Ok(Byte128::from_le_bytes(bytes).into())
                 },
                 _ => {
@@ -177,7 +179,7 @@ pub fn parse_register_value(info: &RegisterInfo, s: &str) -> Result<Value, Value
 
 #[cfg(test)]
 mod test {
-    use crate::parse::{parse_vector, to_integral};
+    use crate::parse::{parse_array, to_integral};
 
     #[test]
     fn to_integral_no_prefix() {
@@ -195,38 +197,38 @@ mod test {
     }
 
     #[test]
-    fn parse_vector_valid() {
-        let v = parse_vector::<2>("[0x01, 0xab]").expect("Failed to parse");
+    fn parse_array_valid() {
+        let v = parse_array::<2>("[0x01, 0xab]").expect("Failed to parse");
         assert_eq!([0x01, 0xab], v);
     }
 
     #[test]
-    fn parse_vector_invalid_missing_opening_bracket() {
-        let r = parse_vector::<2>("0x0a, 0xff]");
+    fn parse_array_invalid_missing_opening_bracket() {
+        let r = parse_array::<2>("0x0a, 0xff]");
         assert!(r.is_err());
     }
 
     #[test]
-    fn parse_vector_invalid_missing_closing_bracket() {
-        let r = parse_vector::<2>("[0x26,0x11");
+    fn parse_array_invalid_missing_closing_bracket() {
+        let r = parse_array::<2>("[0x26,0x11");
         assert!(r.is_err());
     }
 
     #[test]
-    fn parse_vector_invalid_too_many_bytes() {
-        let r = parse_vector::<2>("[0x00, 0x35, 0xfa]");
+    fn parse_array_invalid_too_many_bytes() {
+        let r = parse_array::<2>("[0x00, 0x35, 0xfa]");
         assert!(r.is_err());
     }
 
     #[test]
-    fn parse_vector_invalid_insufficient_bytes() {
-        let r = parse_vector::<2>("[0xab]");
+    fn parse_array_invalid_insufficient_bytes() {
+        let r = parse_array::<2>("[0xab]");
         assert!(r.is_err());
     }
 
     #[test]
-    fn parse_vector_invalid_invalid_byte() {
-        let r = parse_vector::<2>("[0x2a, 0xjj]");
+    fn parse_array_invalid_invalid_byte() {
+        let r = parse_array::<2>("[0x2a, 0xjj]");
         assert!(r.is_err());
     }
 }
