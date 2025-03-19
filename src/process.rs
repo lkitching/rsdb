@@ -2,14 +2,13 @@ use std::cmp::{min};
 use std::{fmt, mem};
 use std::str::{FromStr};
 use std::ptr;
-use std::ffi::{CStr};
 use std::fmt::Formatter;
 use std::num::ParseIntError;
 use std::io::{Read, Write};
 use std::os::fd::{RawFd};
 
 use libc::{pid_t, WIFEXITED, WIFSIGNALED, SIGKILL, STDOUT_FILENO, ADDR_NO_RANDOMIZE, SIGTRAP, process_vm_readv};
-use libc::{c_int, waitpid, kill, SIGSTOP, SIGCONT, WEXITSTATUS, WTERMSIG, WIFSTOPPED, WSTOPSIG, strsignal, iovec, c_void, c_ulong};
+use libc::{c_int, waitpid, kill, SIGSTOP, SIGCONT, WEXITSTATUS, WTERMSIG, WIFSTOPPED, WSTOPSIG, iovec, c_void, c_ulong};
 
 use crate::error::{Error};
 use crate::interop;
@@ -114,11 +113,7 @@ impl StopReason {
 }
 
 fn signal_description(signal: c_int) -> String {
-    unsafe {
-        let description_p = strsignal(signal);
-        let description = CStr::from_ptr(description_p);
-        String::from_utf8_lossy(description.to_bytes()).to_string()
-    }
+    interop::str_signal(signal)
 }
 
 impl fmt::Display for StopReason {
@@ -136,9 +131,8 @@ impl fmt::Display for StopReason {
             ProcessState::Stopped(addr_opt) => {
                 match addr_opt {
                     None => write!(f, "stopped with signal {}", signal_description(self.info)),
-                    Some(addr) => write!(f, "stopped with signal at {}", addr)
+                    Some(addr) => write!(f, "stopped with signal {} at {}", signal_description(self.info), addr)
                 }
-
             }
         }
     }
