@@ -1,5 +1,5 @@
 use std::cmp::{min};
-use std::fmt;
+use std::{fmt, mem};
 use std::str::{FromStr};
 use std::ptr;
 use std::ffi::{CStr};
@@ -17,7 +17,7 @@ use crate::interop::{ptrace, ForkResult};
 use crate::pipe::Pipe;
 use crate::process::PIDParseError::OutOfRange;
 use crate::register::{RegisterId, Registers};
-use crate::types::VirtualAddress;
+use crate::types::{TryFromBytes, VirtualAddress};
 use crate::stoppoint_collection::{StopPoint, StopPointCollection};
 use crate::breakpoint_site::{BreakpointSite};
 
@@ -373,8 +373,38 @@ impl Process {
         }
     }
 
+    pub fn read_memory_as<T: TryFromBytes>(&self, address: VirtualAddress) -> Result<T, Error> {
+        let bytes = self.read_memory(address, size_of::<T>())?;
+        match T::try_from_bytes(bytes.as_slice()) {
+            Ok(v) => Ok(v),
+            Err(e) => { panic!("Unexpected size for type: {}", e) }
+        }
+    }
+
     pub fn write_memory(&mut self, address: VirtualAddress, data: &[u8]) -> Result<(), Error> {
-        unimplemented!()
+        let mut current_address = address;
+
+        // write data to process memory a word at a time
+        for chunk in data.chunks(8) {
+            let word = match chunk.try_into() {
+                Ok(arr) => { u64::from_le_bytes(arr) },
+                Err(_) => {
+                    // fewer than 8 bytes remaining
+                    // read next 8 bytes from memory
+                    // set first remaining bytes of the resulting word to the remainder of data
+                    let read = self.read_memory(current_address, 8)?;
+                    let mut word_bytes: [u8; 8] = read.try_into().expect("Unexpected number of bytes read");
+
+                    word_bytes[0..chunk.len()].copy_from_slice(chunk);
+                    u64::from_le_bytes(word_bytes)
+                }
+            };
+
+            ptrace::poke_data(self.pid, current_address, word as usize)?;
+            current_address += chunk.len() as isize;
+        }
+
+        Ok(())
     }
 }
 
