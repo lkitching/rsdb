@@ -2,7 +2,7 @@ use std::num::{ParseFloatError, ParseIntError};
 use std::fmt;
 use std::fmt::Formatter;
 use crate::register::{RegisterFormat, RegisterInfo};
-use crate::types::{Value, Byte64, Byte128};
+use crate::types::{Value, Byte64, Byte128, VirtualAddress};
 
 #[derive(Debug)]
 pub enum ValueParseError {
@@ -62,6 +62,22 @@ impl_from_str_radix!(u8);
 impl_from_str_radix!(u16);
 impl_from_str_radix!(u32);
 impl_from_str_radix!(u64);
+
+impl FromStrRadix for usize {
+    fn parse_radix(s: &str, radix: u32) -> Result<Self, ParseIntError> {
+        match size_of::<Self>() {
+            4 => u32::from_str_radix(s, radix).map(|n| n as Self),
+            8 => u64::from_str_radix(s, radix).map(|n| n as Self),
+            other => panic!("Unexpected size {} for usize", other)
+        }
+    }
+}
+
+impl FromStrRadix for VirtualAddress {
+    fn parse_radix(s: &str, radix: u32) -> Result<Self, ParseIntError> {
+        usize::from_str_radix(s, radix).map(VirtualAddress::new)
+    }
+}
 
 pub fn to_integral<I: FromStrRadix>(s: &str, radix: u32) -> Result<I, ParseIntError> {
     if radix == 16 && (s.starts_with("0x") || s.starts_with("0X")) {

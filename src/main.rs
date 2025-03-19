@@ -225,6 +225,50 @@ fn handle_breakpoint_command(args: &[&str], process: &mut Process) -> Result<(),
     Ok(())
 }
 
+fn handle_memory_read_command(args: &[&str], process: &mut Process) -> Result<(), DebuggerError> {
+    let addr: VirtualAddress = parse::to_integral(&args[0], 16).map_err(|e| DebuggerError::InvalidCommand(format!("Invalid address: {}", e)))?;
+
+    let num_bytes = if args.len() > 1 {
+        parse::to_integral(&args[1], 10).map_err(|e| DebuggerError::InvalidCommand(format!("Invalid number of bytes: {}", e)))?
+    } else {
+        32usize
+    };
+
+    let data = process.read_memory(addr, num_bytes)?;
+
+    // display data in 16-byte chunks
+    let mut chunk_address = addr;
+    for chunk in data.chunks(16) {
+        let bytes: Vec<String> = chunk.iter().map(|b| format!("{b:x}")).collect();
+        println!("{}: {}", chunk_address, bytes.join(" "));
+        chunk_address += chunk.len() as isize;
+    }
+
+    Ok(())
+}
+
+fn handle_memory_write_command(args: &[&str], process: &mut Process) -> Result<(), DebuggerError> {
+    unimplemented!()
+}
+
+fn handle_memory_command(args: &[&str], process: &mut Process) -> Result<(), DebuggerError> {
+    if args.len() < 2 {
+        print_help(["memory"].as_slice());
+        return Ok(());
+    }
+
+    let memory_command = args[0];
+    let command_args = &args[1..];
+    if "read".starts_with(memory_command) {
+        handle_memory_read_command(command_args, process)
+    } else if "write".starts_with(memory_command) {
+        handle_memory_write_command(command_args, process)
+    } else {
+        print_help(["memory"].as_slice());
+        Ok(())
+    }
+}
+
 fn handle_command(process: &mut Process, line: &str) -> Result<(), DebuggerError> {
     let mut args = line.split(' ');
     let command = args.next().expect("Expected at least one segment");
@@ -245,6 +289,8 @@ fn handle_command(process: &mut Process, line: &str) -> Result<(), DebuggerError
         let reason = process.step_instruction()?;
         print_stop_reason(process, &reason);
         Ok(())
+    } else if "memory".starts_with(command) {
+        handle_memory_command(command_args.as_slice(), process)
     }
     else if "help".starts_with(command) {
         print_help(command_args.as_slice());
