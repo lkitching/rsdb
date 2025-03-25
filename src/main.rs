@@ -3,7 +3,7 @@ use std::fmt;
 use std::str::{FromStr};
 
 use rustyline;
-
+use librsdb::disassembler::print_disassembly;
 use librsdb::error::{Error};
 use librsdb::parse;
 use librsdb::types::{Value, VirtualAddress};
@@ -71,18 +71,12 @@ fn print_help(args: &[&str]) {
     match args.first() {
         None => {
             eprintln!("Available commands:");
-            eprintln!("  breakpoint - Commands for operating on breakpoints");
-            eprintln!("  continue   - Resume the process");
-            eprintln!("  register   - Commands for operating on registers");
-            eprintln!("  step       - Step over a single instruction");
-            eprintln!("  memory     - Commands for operating on memory")
-        },
-        Some(s) if "register".starts_with(s) => {
-            eprintln!("Available commands:");
-            eprintln!("  read");
-            eprintln!("  read <register>");
-            eprintln!("  read all");
-            eprintln!("  write <register> <value>");
+            eprintln!("  breakpoint  - Commands for operating on breakpoints");
+            eprintln!("  continue    - Resume the process");
+            eprintln!("  disassemble - Disassemble machine code to assembly");
+            eprintln!("  memory      - Commands for operating on memory");
+            eprintln!("  register    - Commands for operating on registers");
+            eprintln!("  step        - Step over a single instruction");
         },
         Some(s) if "breakpoint".starts_with(s) => {
             eprintln!("Available commands:");
@@ -91,13 +85,25 @@ fn print_help(args: &[&str]) {
             eprintln!("  disable <id>");
             eprintln!("  enable <id>");
             eprintln!("  set <address>");
+        },
+        Some(s) if "disassemble".starts_with(s) => {
+            eprintln!("Available options:");
+            eprintln!("  -c <number of instructions>");
+            eprintln!("  -a <start address>");
         }
         Some(s) if "memory".starts_with(s) => {
             eprintln!("Available commands:");
             eprintln!("  read <address>");
             eprintln!("  read <address> <num_bytes>");
             eprintln!("  write <address> <bytes>");
-        }
+        },
+        Some(s) if "register".starts_with(s) => {
+            eprintln!("Available commands:");
+            eprintln!("  read");
+            eprintln!("  read <register>");
+            eprintln!("  read all");
+            eprintln!("  write <register> <value>");
+        },
         Some(_s) => {
             eprintln!("No help available on that");
         }
@@ -285,6 +291,60 @@ fn handle_memory_command(args: &[&str], process: &mut Process) -> Result<(), Deb
     }
 }
 
+fn handle_stop(process: &Process, reason: &StopReason) -> Result<(), Error> {
+    print_stop_reason(process, reason);
+    if reason.reason.is_stopped() {
+        print_disassembly(process, process.get_pc(), 5)
+    } else {
+        Ok(())
+    }
+}
+
+fn handle_disassemble_command(process: &Process, args: &[&str]) -> Result<(), DebuggerError> {
+    let mut address = process.get_pc();
+    let mut num_instructions = 5;
+
+    // parse arguments
+    // supported options are '-a <address>' and '-c <instruction_count>'
+    let mut arg_iter = args.iter();
+    while let Some(arg) = arg_iter.next() {
+        match *arg {
+            "-a" => {
+                match arg_iter.next() {
+                    Some(addr_str) => {
+                        let addr = addr_str.parse().map_err(|e| DebuggerError::InvalidCommand(format!("Invalid address format: {}", e)))?;
+                        address = addr;
+                    },
+                    None => {
+                        print_help(&["disassemble"]);
+                        return Ok(())
+                    }
+                }
+            },
+            "-c" => {
+                match arg_iter.next() {
+                    Some(count_str) => {
+                        let count = count_str.parse().map_err(|e| DebuggerError::InvalidCommand(format!("Invalid instruction count: {}", e)))?;
+                        num_instructions = count;
+                    },
+                    None => {
+                        print_help(&["disassemble"]);
+                        return Ok(())
+                    }
+                }
+            },
+            _ => {
+                print_help(&["disassemble"]);
+                return Ok(())
+            }
+        }
+    }
+
+    print_disassembly(process, address, num_instructions)?;
+
+    Ok(())
+}
+
 fn handle_command(process: &mut Process, line: &str) -> Result<(), DebuggerError> {
     let mut args = line.split(' ');
     let command = args.next().expect("Expected at least one segment");
@@ -293,7 +353,7 @@ fn handle_command(process: &mut Process, line: &str) -> Result<(), DebuggerError
     if "continue".starts_with(command) {
         process.resume()?;
         let reason = process.wait_on_signal()?;
-        print_stop_reason(process, &reason);
+        handle_stop(process, &reason)?;
         Ok(())
     } else if "register".starts_with(command) {
         handle_register_command(command_args.as_slice(), process);
@@ -303,10 +363,12 @@ fn handle_command(process: &mut Process, line: &str) -> Result<(), DebuggerError
         Ok(())
     } else if "step".starts_with(command) {
         let reason = process.step_instruction()?;
-        print_stop_reason(process, &reason);
+        handle_stop(process, &reason)?;
         Ok(())
     } else if "memory".starts_with(command) {
         handle_memory_command(command_args.as_slice(), process)
+    } else if "disassemble".starts_with(command) {
+        handle_disassemble_command(process, command_args.as_slice())
     }
     else if "help".starts_with(command) {
         print_help(command_args.as_slice());

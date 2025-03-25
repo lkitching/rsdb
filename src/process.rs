@@ -62,9 +62,10 @@ pub struct Process {
     breakpoint_sites: StopPointCollection<BreakpointSite>
 }
 
+#[derive(Copy, Clone, Debug)]
 pub struct StopReason {
-    reason: ProcessState,
-    info: c_int
+    pub reason: ProcessState,
+    pub info: c_int
 }
 
 #[derive(Copy, Clone, Debug)]
