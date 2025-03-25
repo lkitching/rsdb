@@ -1,10 +1,10 @@
 pub mod ptrace;
 
 use std::os::fd::RawFd;
-use std::ffi::{CString};
+use std::ffi::{CString, CStr};
 use std::ptr;
 
-use libc::{self, c_char, pid_t, c_ulong, c_int};
+use libc::{self, c_char, pid_t, c_ulong, c_int, strsignal};
 use crate::error::Error;
 
 pub fn dup2(src_fd: RawFd, dest_fd: RawFd) -> Result<(), Error> {
@@ -59,4 +59,9 @@ pub fn wait_pid(pid: pid_t, options: c_int) -> Result<c_int, Error> {
     } else {
         Ok(status)
     }
+}
+
+pub fn str_signal(sig: c_int) -> String {
+    let s = unsafe { strsignal(sig) };
+    unsafe { CStr::from_ptr(s) }.to_str().expect("Failed to read CStr").to_owned()
 }

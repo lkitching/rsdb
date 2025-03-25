@@ -10,6 +10,7 @@ default-run = "rsdb"
 libc = "0.2"
 rustyline = "15.0"
 registers-macro = { path = "./registers-macro" }
+zydis-sys = "0.1.2"
 
 [dev-dependencies]
 regex = "1.11.1"
@@ -29,3 +30,7 @@ path = "src/support/run_endlessly.rs"
 [[bin]]
 name = "end_immediately"
 path = "src/support/end_immediately.rs"
+
+[[bin]]
+name = "memory"
+path = "src/support/memory.rs"

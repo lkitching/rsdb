@@ -182,7 +182,23 @@ pub unsafe trait FromBytesRaw {
     unsafe fn from_bytes_raw(bytes: *const u8) -> Self;
 }
 
-macro_rules! derive_from_bytes_raw {
+#[derive(Copy, Clone, Debug)]
+pub struct BinarySizeError {
+    expected_len: usize,
+    actual_len: usize
+}
+
+impl fmt::Display for BinarySizeError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "Expected {} bytes but got {}", self.expected_len, self.actual_len)
+    }
+}
+
+pub trait TryFromBytes : Sized {
+    fn try_from_bytes(bytes: &[u8]) -> Result<Self, BinarySizeError>;
+}
+
+macro_rules! derive_from_bytes {
     ($t:ty, $len:expr) => {
         unsafe impl FromBytesRaw for $t {
             unsafe fn from_bytes_raw(bytes: *const u8) -> Self {
@@ -197,23 +213,32 @@ macro_rules! derive_from_bytes_raw {
                 Self::from_le_bytes(a)
             }
         }
+
+        impl TryFromBytes for $t {
+            fn try_from_bytes(bytes: &[u8]) -> Result<Self, BinarySizeError> {
+                match bytes.try_into() {
+                    Ok(arr) => Ok(Self::from_le_bytes(arr)),
+                    Err(_) => Err(BinarySizeError { expected_len: $len, actual_len: bytes.len() })
+                }
+            }
+        }
     };
 }
 
-derive_from_bytes_raw!(u8, 1);
-derive_from_bytes_raw!(u16, 2);
-derive_from_bytes_raw!(u32, 4);
-derive_from_bytes_raw!(u64, 8);
-derive_from_bytes_raw!(i8, 1);
-derive_from_bytes_raw!(i16, 2);
-derive_from_bytes_raw!(i32, 4);
-derive_from_bytes_raw!(i64, 8);
-derive_from_bytes_raw!(f32, 4);
-derive_from_bytes_raw!(f64, 8);
-derive_from_bytes_raw!(f128, 16);
-derive_from_bytes_raw!(Byte64, 8);
-derive_from_bytes_raw!(Byte128, 16);
-derive_from_bytes_raw!(usize, 8);
+derive_from_bytes!(u8, 1);
+derive_from_bytes!(u16, 2);
+derive_from_bytes!(u32, 4);
+derive_from_bytes!(u64, 8);
+derive_from_bytes!(i8, 1);
+derive_from_bytes!(i16, 2);
+derive_from_bytes!(i32, 4);
+derive_from_bytes!(i64, 8);
+derive_from_bytes!(f32, 4);
+derive_from_bytes!(f64, 8);
+derive_from_bytes!(f128, 16);
+derive_from_bytes!(Byte64, 8);
+derive_from_bytes!(Byte128, 16);
+derive_from_bytes!(usize, 8);
 
 // TODO: don't need copy super trait?
 pub trait ToBytes : Copy {
@@ -445,7 +470,7 @@ impl TryWiden for Value {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct VirtualAddress {
     addr: usize
 }
@@ -454,6 +479,7 @@ impl VirtualAddress {
     pub fn new(addr: usize) -> Self {
         Self { addr }
     }
+    pub fn addr(&self) -> usize { self.addr }
 }
 
 impl From<usize> for VirtualAddress {
@@ -510,6 +536,19 @@ impl Sub<isize> for VirtualAddress {
     }
 }
 
+impl Sub<VirtualAddress> for VirtualAddress {
+    type Output = isize;
+
+    fn sub(self, rhs: Self) -> Self::Output {
+        if self >= rhs {
+            (self.addr - rhs.addr) as isize
+        } else {
+            let diff = (rhs.addr - self.addr) as isize;
+            -diff
+        }
+    }
+}
+
 impl SubAssign<isize> for VirtualAddress {
     fn sub_assign(&mut self, rhs: isize) {
         let r = *self - rhs;
@@ -535,5 +574,28 @@ impl FromStr for VirtualAddress {
 
         let addr = usize::from_str_radix(num_str, 16)?;
         Ok(Self { addr })
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn virtual_address_diff_positive() {
+        let v1 = VirtualAddress::new(35);
+        let v2 = VirtualAddress::new(12);
+        let diff = v1 - v2;
+
+        assert_eq!(23, diff, "Unexpected address diff");
+    }
+
+    #[test]
+    fn virtual_address_diff_negative() {
+        let v1 = VirtualAddress::new(17);
+        let v2 = VirtualAddress::new(41);
+        let diff = v1 - v2;
+
+        assert_eq!(-24, diff, "Unexpected address diff");
     }
 }

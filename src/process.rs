@@ -1,14 +1,14 @@
-use std::fmt;
+use std::cmp::{min};
+use std::{fmt, mem};
 use std::str::{FromStr};
 use std::ptr;
-use std::ffi::{CStr};
 use std::fmt::Formatter;
 use std::num::ParseIntError;
 use std::io::{Read, Write};
 use std::os::fd::{RawFd};
 
-use libc::{pid_t, WIFEXITED, WIFSIGNALED, SIGKILL, STDOUT_FILENO, ADDR_NO_RANDOMIZE, SIGTRAP};
-use libc::{c_int, waitpid, kill, SIGSTOP, SIGCONT, WEXITSTATUS, WTERMSIG, WIFSTOPPED, WSTOPSIG, strsignal};
+use libc::{pid_t, WIFEXITED, WIFSIGNALED, SIGKILL, STDOUT_FILENO, ADDR_NO_RANDOMIZE, SIGTRAP, process_vm_readv};
+use libc::{c_int, waitpid, kill, SIGSTOP, SIGCONT, WEXITSTATUS, WTERMSIG, WIFSTOPPED, WSTOPSIG, iovec, c_void, c_ulong};
 
 use crate::error::{Error};
 use crate::interop;
@@ -16,7 +16,7 @@ use crate::interop::{ptrace, ForkResult};
 use crate::pipe::Pipe;
 use crate::process::PIDParseError::OutOfRange;
 use crate::register::{RegisterId, Registers};
-use crate::types::VirtualAddress;
+use crate::types::{TryFromBytes, VirtualAddress};
 use crate::stoppoint_collection::{StopPoint, StopPointCollection};
 use crate::breakpoint_site::{BreakpointSite};
 
@@ -62,9 +62,10 @@ pub struct Process {
     breakpoint_sites: StopPointCollection<BreakpointSite>
 }
 
+#[derive(Copy, Clone, Debug)]
 pub struct StopReason {
-    reason: ProcessState,
-    info: c_int
+    pub reason: ProcessState,
+    pub info: c_int
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -113,11 +114,7 @@ impl StopReason {
 }
 
 fn signal_description(signal: c_int) -> String {
-    unsafe {
-        let description_p = strsignal(signal);
-        let description = CStr::from_ptr(description_p);
-        String::from_utf8_lossy(description.to_bytes()).to_string()
-    }
+    interop::str_signal(signal)
 }
 
 impl fmt::Display for StopReason {
@@ -135,9 +132,8 @@ impl fmt::Display for StopReason {
             ProcessState::Stopped(addr_opt) => {
                 match addr_opt {
                     None => write!(f, "stopped with signal {}", signal_description(self.info)),
-                    Some(addr) => write!(f, "stopped with signal at {}", addr)
+                    Some(addr) => write!(f, "stopped with signal {} at {}", signal_description(self.info), addr)
                 }
-
             }
         }
     }
@@ -337,6 +333,87 @@ impl Process {
 
     pub fn breakpoint_sites(&self) -> &StopPointCollection<BreakpointSite> { &self.breakpoint_sites }
     pub fn breakpoint_sites_mut(&mut self) -> &mut StopPointCollection<BreakpointSite> { &mut self.breakpoint_sites }
+
+    pub fn read_memory(&self, address: VirtualAddress, num_bytes: usize) -> Result<Vec<u8>, Error> {
+        let mut ret = vec![0u8; num_bytes];
+        let local_desc = iovec { iov_base: ret.as_mut_ptr() as *mut c_void, iov_len: ret.len() };
+
+        let mut remaining = num_bytes;
+        let mut current_address = address;
+        let mut remote_descs = Vec::new();
+
+        while remaining > 0 {
+            let up_to_next_page = 0x1000 - (address.addr() & 0xFFF);
+            let chunk_size = min(remaining, up_to_next_page);
+
+            remote_descs.push(iovec { iov_base: address.addr() as *mut c_void, iov_len: chunk_size });
+
+            remaining -= chunk_size;
+            current_address += chunk_size as isize;
+        }
+
+        let result = unsafe { process_vm_readv(
+            self.pid,
+            &local_desc,
+            1,
+            remote_descs.as_ptr(),
+            remote_descs.len() as c_ulong,
+            0
+        )};
+
+        if result < 0 {
+            Err(Error::from_errno("Could not read process memory"))
+        } else {
+            Ok(ret)
+        }
+    }
+
+    pub fn read_memory_without_traps(&self, address: VirtualAddress, num_bytes: usize) -> Result<Vec<u8>, Error> {
+        let mut memory = self.read_memory(address, num_bytes)?;
+        let address_range = address..(address + num_bytes as isize + 1);
+        let sites = self.breakpoint_sites.get_in_region(&address_range);
+
+        for site in sites.filter(|sp| sp.is_enabled()) {
+            let offset = site.address() - address;
+            memory[offset as usize] = site.saved_data()
+        }
+
+        Ok(memory)
+    }
+
+    pub fn read_memory_as<T: TryFromBytes>(&self, address: VirtualAddress) -> Result<T, Error> {
+        let bytes = self.read_memory(address, size_of::<T>())?;
+        match T::try_from_bytes(bytes.as_slice()) {
+            Ok(v) => Ok(v),
+            Err(e) => { panic!("Unexpected size for type: {}", e) }
+        }
+    }
+
+    pub fn write_memory(&mut self, address: VirtualAddress, data: &[u8]) -> Result<(), Error> {
+        let mut current_address = address;
+
+        // write data to process memory a word at a time
+        for chunk in data.chunks(8) {
+            let word = match chunk.try_into() {
+                Ok(arr) => { u64::from_le_bytes(arr) },
+                Err(_) => {
+                    // fewer than 8 bytes remaining
+                    // read next 8 bytes from memory
+                    // set first remaining bytes of the resulting word to the remainder of data
+                    let read = self.read_memory(current_address, 8)?;
+                    let mut word_bytes: [u8; 8] = read.try_into().expect("Unexpected number of bytes read");
+
+                    word_bytes[0..chunk.len()].copy_from_slice(chunk);
+                    u64::from_le_bytes(word_bytes)
+                }
+            };
+
+            ptrace::poke_data(self.pid, current_address, word as usize)?;
+            current_address += chunk.len() as isize;
+        }
+
+        Ok(())
+    }
 }
 
 impl Drop for Process {
@@ -803,5 +880,52 @@ mod test {
         proc.breakpoint_sites_mut().remove_by_id(bp1_id);
         proc.breakpoint_sites_mut().remove_by_address(VirtualAddress::new(43));
         assert!(proc.breakpoint_sites().is_empty(), "Expected breakpoints to be removed");
+    }
+
+    #[test]
+    fn reading_and_writing_memory_test() -> Result<(), Error> {
+        let close_on_exec = false;
+        let mut channel = Pipe::create(close_on_exec)?;
+
+        let mut proc = Process::launch("target/debug/memory", true, StdoutReplacement::Fd(channel.write_fd()))?;
+        channel.close_write();
+
+        proc.resume()?;
+        proc.wait_on_signal()?;
+
+        // debugee should have written pointer to stdout
+        let mut ptr_bytes = [0u8; 8];
+        channel.read_exact(&mut ptr_bytes)?;
+        let ptr = usize::try_from_bytes(ptr_bytes.as_slice()).expect("Failed to read pointer");
+
+        let bytes = proc.read_memory(VirtualAddress::new(ptr), 8)?;
+        let word = u64::try_from_bytes(bytes.as_slice()).expect("Failed to read word");
+
+        assert_eq!(0xcafecafe, word, "Unexpected value for word");
+
+        proc.resume()?;
+        proc.wait_on_signal()?;
+
+        let message = "Hello, rsdb!";
+
+        let str_ptr = {
+            // debuggee should have written address of string to write to stdout`
+            let mut ptr_bytes = [0u8; 8];
+            channel.read_exact(&mut ptr_bytes)?;
+            usize::try_from_bytes(ptr_bytes.as_slice()).expect("Failed to read pointer")
+        };
+
+        proc.write_memory(VirtualAddress::new(str_ptr), message.as_bytes())?;
+
+        proc.resume()?;
+        proc.wait_on_signal()?;
+
+        // debuggee should have written the previous message to stdout
+        let mut written = String::with_capacity(message.len());
+        channel.read_to_string(&mut written)?;
+
+        assert_eq!(message, written, "Unexpected message after memory write");
+
+        Ok(())
     }
 }
