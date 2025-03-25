@@ -1,4 +1,6 @@
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::ops::Range;
+
 use libc::{pid_t};
 
 use crate::types::VirtualAddress;
@@ -66,6 +68,10 @@ impl BreakpointSite {
         self.is_enabled = false;
         Ok(())
     }
+
+    pub fn saved_data(&self) -> u8 {
+        self.saved_data
+    }
 }
 
 impl StopPoint for BreakpointSite {
@@ -73,5 +79,10 @@ impl StopPoint for BreakpointSite {
     fn id(&self) -> Self::IdType { self.id }
     fn at_address(&self, address: VirtualAddress) -> bool { self.address == address }
     fn is_enabled(&self) -> bool { self.is_enabled }
+
+    fn in_range(&self, address_range: &Range<VirtualAddress>) -> bool {
+        address_range.contains(&self.address)
+    }
+
     fn disable(&mut self) { self.is_enabled = false; }
 }

@@ -1,12 +1,15 @@
+use std::ops::Range;
+
 use crate::types::VirtualAddress;
 use crate::error::{Error};
-use crate::register::RegisterType;
 
 pub trait StopPoint {
     type IdType: Copy + PartialEq;
     fn id(&self) -> Self::IdType;
 
     fn at_address(&self, address: VirtualAddress) -> bool;
+
+    fn in_range(&self, address_range: &Range<VirtualAddress>) -> bool;
 
     fn is_enabled(&self) -> bool;
 
@@ -66,6 +69,10 @@ impl <S : StopPoint> StopPointCollection<S> {
         if let Some((idx, _sp)) = self.find_indexed_by_address(address) {
             self.remove_by_index(idx);
         }
+    }
+
+    pub fn get_in_region<'a>(&'a self, addresses: &'a Range<VirtualAddress>) -> impl Iterator<Item=&'a S> {
+        self.stop_points.iter().filter(|sp| sp.in_range(addresses))
     }
 
     fn remove_by_index(&mut self, idx: usize) {

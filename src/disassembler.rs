@@ -31,7 +31,7 @@ impl <'a> Disassembler<'a> {
         let address = address.unwrap_or(self.process.get_pc());
 
         // NOTE: largest x64 instruction is 15 bytes so ensure we read enough to cover the number of instructions
-        let code = self.process.read_memory(address, num_instructions * 15)?;
+        let code = self.process.read_memory_without_traps(address, num_instructions * 15)?;
 
         {
             let mut code_p = code.as_ptr();

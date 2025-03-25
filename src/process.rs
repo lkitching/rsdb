@@ -368,6 +368,19 @@ impl Process {
         }
     }
 
+    pub fn read_memory_without_traps(&self, address: VirtualAddress, num_bytes: usize) -> Result<Vec<u8>, Error> {
+        let mut memory = self.read_memory(address, num_bytes)?;
+        let address_range = address..(address + num_bytes as isize + 1);
+        let sites = self.breakpoint_sites.get_in_region(&address_range);
+
+        for site in sites.filter(|sp| sp.is_enabled()) {
+            let offset = site.address() - address;
+            memory[offset as usize] = site.saved_data()
+        }
+
+        Ok(memory)
+    }
+
     pub fn read_memory_as<T: TryFromBytes>(&self, address: VirtualAddress) -> Result<T, Error> {
         let bytes = self.read_memory(address, size_of::<T>())?;
         match T::try_from_bytes(bytes.as_slice()) {

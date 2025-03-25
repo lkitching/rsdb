@@ -470,7 +470,7 @@ impl TryWiden for Value {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct VirtualAddress {
     addr: usize
 }
@@ -536,6 +536,19 @@ impl Sub<isize> for VirtualAddress {
     }
 }
 
+impl Sub<VirtualAddress> for VirtualAddress {
+    type Output = isize;
+
+    fn sub(self, rhs: Self) -> Self::Output {
+        if self >= rhs {
+            (self.addr - rhs.addr) as isize
+        } else {
+            let diff = (rhs.addr - self.addr) as isize;
+            -diff
+        }
+    }
+}
+
 impl SubAssign<isize> for VirtualAddress {
     fn sub_assign(&mut self, rhs: isize) {
         let r = *self - rhs;
@@ -561,5 +574,28 @@ impl FromStr for VirtualAddress {
 
         let addr = usize::from_str_radix(num_str, 16)?;
         Ok(Self { addr })
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn virtual_address_diff_positive() {
+        let v1 = VirtualAddress::new(35);
+        let v2 = VirtualAddress::new(12);
+        let diff = v1 - v2;
+
+        assert_eq!(23, diff, "Unexpected address diff");
+    }
+
+    #[test]
+    fn virtual_address_diff_negative() {
+        let v1 = VirtualAddress::new(17);
+        let v2 = VirtualAddress::new(41);
+        let diff = v1 - v2;
+
+        assert_eq!(-24, diff, "Unexpected address diff");
     }
 }
