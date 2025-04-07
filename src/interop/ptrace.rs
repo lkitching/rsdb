@@ -1,6 +1,6 @@
 use std::{mem, ptr};
 
-use libc::{c_void, pid_t, user_fpregs_struct, user_regs_struct, c_long, size_t, PTRACE_SINGLESTEP};
+use libc::{c_void, pid_t, user_fpregs_struct, user_regs_struct, size_t, PTRACE_SINGLESTEP};
 use libc::{ptrace, PTRACE_TRACEME, PTRACE_ATTACH, PTRACE_CONT, PTRACE_DETACH, PTRACE_GETREGS, PTRACE_GETFPREGS, PTRACE_PEEKUSER, PTRACE_POKEUSER, PTRACE_SETREGS, PTRACE_SETFPREGS};
 use libc::{PTRACE_PEEKDATA, PTRACE_POKEDATA};
 use crate::error::*;

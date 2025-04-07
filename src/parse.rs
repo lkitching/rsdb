@@ -121,7 +121,7 @@ fn parse_array<const N: usize>(s: &str) -> Result<[u8; N], ParseVectorError> {
     let vec = parse_vector(s)?;
     let len = vec.len();
 
-    vec.try_into().map_err(|e| ParseVectorError { error: format!("Expected {} bytes but got {}", N, len) })
+    vec.try_into().map_err(|_e| ParseVectorError { error: format!("Expected {} bytes but got {}", N, len) })
 }
 
 pub fn parse_register_value(info: &RegisterInfo, s: &str) -> Result<Value, ValueParseError> {

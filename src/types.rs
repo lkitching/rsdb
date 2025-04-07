@@ -1,5 +1,4 @@
-use std::{fmt, mem};
-use std::fmt::Formatter;
+use std::fmt::{self, Formatter};
 use std::num::ParseIntError;
 use std::ops::{Add, Sub, AddAssign, SubAssign};
 use std::str::{FromStr};

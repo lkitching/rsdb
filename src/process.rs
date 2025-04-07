@@ -1,8 +1,7 @@
 use std::cmp::{min};
-use std::{fmt, mem};
 use std::str::{FromStr};
 use std::ptr;
-use std::fmt::Formatter;
+use std::fmt::{self, Formatter};
 use std::num::ParseIntError;
 use std::io::{Read, Write};
 use std::os::fd::{RawFd};
@@ -522,7 +521,7 @@ mod test {
     fn get_entry_point_offset(path: &Path) -> u64 {
         let mut header = unsafe { mem::zeroed::<Elf64_Ehdr>() };
         let p: *mut u8 = unsafe { mem::transmute(&mut header as *mut Elf64_Ehdr) };
-        let bytes = unsafe { std::slice::from_raw_parts_mut(p, mem::size_of::<Elf64_Ehdr>() ) };
+        let bytes = unsafe { std::slice::from_raw_parts_mut(p, size_of::<Elf64_Ehdr>() ) };
 
         {
             let mut f = File::open(path).expect("Failed to open executable");
