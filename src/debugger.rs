@@ -67,8 +67,8 @@ fn print_stop_reason(process: &Process, reason: &StopReason) {
     println!("Process {} {}", process.pid(), reason)
 }
 
-fn print_help(args: &[&str]) {
-    match args.first() {
+fn print_help(category: Option<HelpCategory>) {
+    match category {
         None => {
             eprintln!("Available commands:");
             eprintln!("  breakpoint  - Commands for operating on breakpoints");
@@ -78,7 +78,7 @@ fn print_help(args: &[&str]) {
             eprintln!("  register    - Commands for operating on registers");
             eprintln!("  step        - Step over a single instruction");
         },
-        Some(s) if "breakpoint".starts_with(s) => {
+        Some(HelpCategory::Breakpoint) => {
             eprintln!("Available commands:");
             eprintln!("  list");
             eprintln!("  delete <id>");
@@ -86,26 +86,23 @@ fn print_help(args: &[&str]) {
             eprintln!("  enable <id>");
             eprintln!("  set <address>");
         },
-        Some(s) if "disassemble".starts_with(s) => {
+        Some(HelpCategory::Disassemble) => {
             eprintln!("Available options:");
             eprintln!("  -c <number of instructions>");
             eprintln!("  -a <start address>");
         }
-        Some(s) if "memory".starts_with(s) => {
+        Some(HelpCategory::Memory) => {
             eprintln!("Available commands:");
             eprintln!("  read <address>");
             eprintln!("  read <address> <num_bytes>");
             eprintln!("  write <address> <bytes>");
         },
-        Some(s) if "register".starts_with(s) => {
+        Some(HelpCategory::Register) => {
             eprintln!("Available commands:");
             eprintln!("  read");
             eprintln!("  read <register>");
             eprintln!("  read all");
             eprintln!("  write <register> <value>");
-        },
-        Some(_s) => {
-            eprintln!("No help available on that");
         }
     }
 }
@@ -114,39 +111,62 @@ fn print_register_info(register: &RegisterInfo, value: Value) {
     println!("{}:\t{}", register.name, value);
 }
 
-fn handle_register_read(args: &[&str], process: &Process) {
+enum RegisterReadCommand {
+    GeneralPurpose,
+    All,
+    Specific(&'static RegisterInfo)
+}
+
+fn parse_register_read_command(args: &[&str]) -> Result<RegisterReadCommand, CommandParseError> {
     match args.first() {
-        None => {
-            // display all general-purpose registers except 'orig_rax'
-            let gprs = REGISTER_INFOS.iter().filter(|r| r.ty == RegisterType::GeneralPurpose && r.name != "orig_rax");
-            for register in gprs {
-                let value = process.registers().read(register);
-                print_register_info(register, value);
-            }
-        },
-        Some(&"all") => {
-            for register in REGISTER_INFOS.iter() {
-                let value = process.registers().read(register);
-                print_register_info(register, value);
-            }
-        },
+        None => Ok(RegisterReadCommand::GeneralPurpose),
+        Some(&"all") => Ok(RegisterReadCommand::All),
         Some(reg_name) => {
             match find_register_info_by_name(*reg_name) {
-                Some(register) => {
-                    let value = process.registers().read(register);
-                    print_register_info(register, value);
-                },
-                None => {
-                    eprintln!("No such register {}", args[0])
-                }
+                Some(register) => Ok(RegisterReadCommand::Specific(register)),
+                None => Err(CommandParseError { message: format!("No such register {}", reg_name), help: None })
             }
         }
     }
 }
 
-fn handle_register_write(args: &[&str], process: &mut Process) {
+fn handle_register_command(cmd: RegisterCommand, process: &mut Process) -> Result<(), DebuggerError> {
+    match cmd {
+        RegisterCommand::Read(read_cmd) => {
+            match read_cmd {
+                RegisterReadCommand::GeneralPurpose => {
+                    let gprs = REGISTER_INFOS.iter().filter(|r| r.ty == RegisterType::GeneralPurpose && r.name != "orig_rax");
+                    for register in gprs {
+                        let value = process.registers().read(register);
+                        print_register_info(register, value);
+                    }
+                },
+                RegisterReadCommand::All => {
+                    for register in REGISTER_INFOS.iter() {
+                        let value = process.registers().read(register);
+                        print_register_info(register, value);
+                    }
+                },
+                RegisterReadCommand::Specific(register) => {
+                    let value = process.registers().read(register);
+                    print_register_info(register, value);
+                }
+            }
+        },
+        RegisterCommand::Write(register, value) => {
+            let write_result = process.registers_mut().write(register, value);
+            if let Err(e) = write_result {
+                eprintln!("Failed to write register {}: {}", register.name, e)
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn parse_register_write_command(args: &[&str]) -> Result<RegisterCommand, CommandParseError> {
     if args.len() < 2 {
-        print_help(["register"].as_slice())
+        Err(CommandParseError { message: String::new(), help: Some(HelpCategory::Register) })
     } else {
         let name = args[0];
         let value_str = args[1];
@@ -154,140 +174,181 @@ fn handle_register_write(args: &[&str], process: &mut Process) {
             Some(register) => {
                 match parse_register_value(register, value_str) {
                     Ok(value) => {
-                        let write_result = process.registers_mut().write(register, value);
-                        if let Err(e) = write_result {
-                            eprintln!("Failed to write register {}: {}", name, e)
-                        }
+                        Ok(RegisterCommand::Write(register, value))
                     },
                     Err(parse_err) => {
-                        eprintln!("Invalid register value: {}", parse_err)
+                        Err(CommandParseError { message: format!("Invalid register value: {}", parse_err), help: None })
                     }
                 }
             },
             None => {
-                eprintln!("No such register {}", name);
+                Err(CommandParseError { message: format!("No such register {}", name), help: None })
             }
         }
     }
 }
 
-fn handle_register_command(args: &[&str], process: &mut Process) {
+enum RegisterCommand {
+    Read(RegisterReadCommand),
+    Write(&'static RegisterInfo, Value)
+}
+
+fn parse_register_command(args: &[&str]) -> Result<RegisterCommand, CommandParseError> {
     if args.is_empty() {
-        print_help(["register"].as_slice());
+        Err(CommandParseError { message: String::new(), help: Some(HelpCategory::Register) })
     } else if args[0].starts_with("read") {
-        handle_register_read(&args[1..], process);
+        let read_cmd = parse_register_read_command(&args[1..])?;
+        Ok(RegisterCommand::Read(read_cmd))
     } else if args[0].starts_with("write") {
-        handle_register_write(&args[1..], process);
+        parse_register_write_command(&args[1..])
     } else {
-        print_help(["register"].as_slice())
+        Err(CommandParseError { message: String::new(), help: Some(HelpCategory::Register) })
     }
 }
 
-fn handle_breakpoint_command(args: &[&str], process: &mut Process) -> Result<(), Error> {
+enum BreakpointCommand {
+    List,
+    Set(VirtualAddress),
+    Enable(u32),
+    Disable(u32),
+    Delete(u32)
+}
+
+fn parse_breakpoint_command(args: &[&str]) -> Result<BreakpointCommand, CommandParseError> {
     if args.is_empty() {
-        print_help(["breakpoint"].as_slice());
-        return Ok(());
+        return Err(CommandParseError { message: String::new(), help: Some(HelpCategory::Breakpoint) });
     }
 
     let command = args[0];
 
     if "list".starts_with(command) {
-        if process.breakpoint_sites().is_empty() {
-            println!("No breakpoints set");
-        } else {
-            println!("Current breakpoints:");
-            for bp in process.breakpoint_sites().iter() {
-                println!("{}: address = {}, {}", bp.id(), bp.address(), if bp.is_enabled() { "enabled" } else { "disabled" });
-            }
-        }
-        return Ok(());
+        return Ok(BreakpointCommand::List);
     }
 
     if args.len() < 2 {
-        print_help(["breakpoint"].as_slice());
+        return Err(CommandParseError { message: String::new(), help: Some(HelpCategory::Breakpoint) });
+    }
+
+    fn parse_id(id_str: &str) -> Result<u32, CommandParseError> {
+        parse::to_integral(id_str, 16).map_err(|e| CommandParseError { message: format!("Invalid id: {}", e), help: None })
     }
 
     if "set".starts_with(command) {
-        match VirtualAddress::from_str(args[1]) {
-            Ok(addr) => {
-                let bp = process.create_breakpoint_site(addr)?;
-                bp.enable()?;
-            },
-            Err(e) => {
-                eprintln!("Breakpoint command expected address in hexadecimal: {}", e);
-            }
-        }
+        let address = VirtualAddress::from_str(args[1])
+            .map_err(|e| CommandParseError { message: format!("Breakpoint command expected address in hexadecimal: {}", e), help: None})?;
+        Ok(BreakpointCommand::Set(address))
     } else if "enable".starts_with(command) {
-        let id = parse::to_integral(args[1], 16).expect("Invalid id");
-        let bp = process.breakpoint_sites_mut().get_by_id_mut(id)?;
-        bp.enable()?;
+        let id = parse_id(args[1])?;
+        Ok(BreakpointCommand::Enable(id))
     } else if "disable".starts_with(command) {
-        let id = parse::to_integral(args[1], 16).expect("Invalid id");
-        let bp = process.breakpoint_sites_mut().get_by_id_mut(id)?;
-        bp.disable()?;
+        let id = parse_id(args[1])?;
+        Ok(BreakpointCommand::Disable(id))
     } else if "delete".starts_with(command) {
-        let id = parse::to_integral(args[1], 16).expect("Invalid id");
-        process.breakpoint_sites_mut().remove_by_id(id);
+        let id = parse_id(args[1])?;
+        Ok(BreakpointCommand::Delete(id))
     } else {
-        eprintln!("Unknown breakpoint command {}", command);
-        print_help(["register"].as_slice())
+        Err(CommandParseError { message: format!("Unknown breakpoint command {}", command), help: Some(HelpCategory::Breakpoint)})
+    }
+}
+
+fn handle_breakpoint_command(cmd: BreakpointCommand, process: &mut Process) -> Result<(), DebuggerError> {
+    match cmd {
+        BreakpointCommand::List => {
+            if process.breakpoint_sites().is_empty() {
+                println!("No breakpoints set");
+            } else {
+                println!("Current breakpoints:");
+                for bp in process.breakpoint_sites().iter() {
+                    println!("{}: address = {}, {}", bp.id(), bp.address(), if bp.is_enabled() { "enabled" } else { "disabled" });
+                }
+            }
+        },
+        BreakpointCommand::Set(addr) => {
+            let bp = process.create_breakpoint_site(addr)?;
+            bp.enable()?;
+        },
+        BreakpointCommand::Enable(id) => {
+            let bp = process.breakpoint_sites_mut().get_by_id_mut(id)?;
+            bp.enable()?;
+        },
+        BreakpointCommand::Disable(id) => {
+            let bp = process.breakpoint_sites_mut().get_by_id_mut(id)?;
+            bp.disable()?;
+        },
+        BreakpointCommand::Delete(id) => {
+            process.breakpoint_sites_mut().remove_by_id(id);
+        }
     }
 
-    // TODO: create type for UI errors?
-    // this returns ok even if command was invalid
     Ok(())
 }
 
-fn handle_memory_read_command(args: &[&str], process: &mut Process) -> Result<(), DebuggerError> {
-    let addr: VirtualAddress = parse::to_integral(&args[0], 16).map_err(|e| DebuggerError::InvalidCommand(format!("Invalid address: {}", e)))?;
+fn handle_memory_command(cmd: MemoryCommand, process: &mut Process) -> Result<(), DebuggerError> {
+    match cmd {
+        MemoryCommand::Read(addr, num_bytes) => {
+            let data = process.read_memory(addr, num_bytes)?;
 
+            // display data in 16-byte chunks
+            let mut chunk_address = addr;
+            for chunk in data.chunks(16) {
+                let bytes: Vec<String> = chunk.iter().map(|b| format!("{b:02x}")).collect();
+                println!("{}: {}", chunk_address, bytes.join(" "));
+                chunk_address += chunk.len() as isize;
+            }
+        },
+        MemoryCommand::Write(addr, bytes) => {
+            process.write_memory(addr, bytes.as_slice())?;
+        }
+    }
+
+    Ok(())
+}
+
+fn parse_address(addr_str: &str) -> Result<VirtualAddress, CommandParseError> {
+    parse::to_integral(addr_str, 16)
+        .map_err(|e| CommandParseError { message: format!("Invalid address: {}", e), help: None })
+}
+
+fn parse_memory_write_command(args: &[&str]) -> Result<MemoryCommand, CommandParseError> {
+    if args.len() == 2 {
+        let addr = parse_address(args[0])?;
+        let data = parse::parse_vector(&args[1])
+            .map_err(|e| CommandParseError { message: format!("Invalid data format: {}", e), help: None })?;
+        Ok(MemoryCommand::Write(addr, data))
+    } else {
+        Err(CommandParseError { message: String::new(), help: Some(HelpCategory::Memory) })
+    }
+}
+
+enum MemoryCommand {
+    Read(VirtualAddress, usize),
+    Write(VirtualAddress, Vec<u8>)
+}
+
+fn parse_memory_read_command(args: &[&str]) -> Result<MemoryCommand, CommandParseError> {
+    let address = parse_address(args[0])?;
     let num_bytes = if args.len() > 1 {
-        parse::to_integral(&args[1], 10).map_err(|e| DebuggerError::InvalidCommand(format!("Invalid number of bytes: {}", e)))?
+        parse::to_integral(&args[1], 10)
+            .map_err(|e| CommandParseError { message: format!("Invalid number of bytes: {}", e), help: None })?
     } else {
         32usize
     };
-
-    let data = process.read_memory(addr, num_bytes)?;
-
-    // display data in 16-byte chunks
-    let mut chunk_address = addr;
-    for chunk in data.chunks(16) {
-        let bytes: Vec<String> = chunk.iter().map(|b| format!("{b:02x}")).collect();
-        println!("{}: {}", chunk_address, bytes.join(" "));
-        chunk_address += chunk.len() as isize;
-    }
-
-    Ok(())
+    Ok(MemoryCommand::Read(address, num_bytes))
 }
 
-fn handle_memory_write_command(args: &[&str], process: &mut Process) -> Result<(), DebuggerError> {
-    if args.len() != 2 {
-        print_help(["memory"].as_slice());
-        return Ok(())
-    }
-
-    let addr: VirtualAddress = parse::to_integral(&args[0], 16).map_err(|e| DebuggerError::InvalidCommand(format!("Invalid address: {}", e)))?;
-    let data = parse::parse_vector(&args[1]).map_err(|e| DebuggerError::InvalidCommand(format!("Invalid data format: {}", e)))?;
-
-    process.write_memory(addr, data.as_slice())?;
-    Ok(())
-}
-
-fn handle_memory_command(args: &[&str], process: &mut Process) -> Result<(), DebuggerError> {
+fn parse_memory_command(args: &[&str]) -> Result<MemoryCommand, CommandParseError> {
     if args.len() < 2 {
-        print_help(["memory"].as_slice());
-        return Ok(());
+        return Err(CommandParseError { message: String::new(), help: Some(HelpCategory::Memory) });
     }
 
     let memory_command = args[0];
     let command_args = &args[1..];
     if "read".starts_with(memory_command) {
-        handle_memory_read_command(command_args, process)
+        parse_memory_read_command(command_args)
     } else if "write".starts_with(memory_command) {
-        handle_memory_write_command(command_args, process)
+        parse_memory_write_command(command_args)
     } else {
-        print_help(["memory"].as_slice());
-        Ok(())
+        Err(CommandParseError { message: String::new(), help: Some(HelpCategory::Memory) })
     }
 }
 
@@ -300,9 +361,14 @@ fn handle_stop(process: &Process, reason: &StopReason) -> Result<(), Error> {
     }
 }
 
-fn handle_disassemble_command(process: &Process, args: &[&str]) -> Result<(), DebuggerError> {
-    let mut address = process.get_pc();
-    let mut num_instructions = 5;
+struct DisassembleCommand {
+    address: Option<VirtualAddress>,
+    instruction_count: usize
+}
+
+fn parse_disassemble_command(args: &[&str]) -> Result<DisassembleCommand, CommandParseError> {
+    let mut address = None;
+    let mut instruction_count = 5;
 
     // parse arguments
     // supported options are '-a <address>' and '-c <instruction_count>'
@@ -312,70 +378,154 @@ fn handle_disassemble_command(process: &Process, args: &[&str]) -> Result<(), De
             "-a" => {
                 match arg_iter.next() {
                     Some(addr_str) => {
-                        let addr = addr_str.parse().map_err(|e| DebuggerError::InvalidCommand(format!("Invalid address format: {}", e)))?;
-                        address = addr;
+                        let addr = addr_str.parse().map_err(|e| CommandParseError { message: format!("Invalid address format: {}", e), help: None })?;
+                        address = Some(addr)
                     },
                     None => {
-                        print_help(&["disassemble"]);
-                        return Ok(())
+                        return Err(CommandParseError { message: String::new(), help: Some(HelpCategory::Disassemble) });
                     }
                 }
             },
             "-c" => {
                 match arg_iter.next() {
                     Some(count_str) => {
-                        let count = count_str.parse().map_err(|e| DebuggerError::InvalidCommand(format!("Invalid instruction count: {}", e)))?;
-                        num_instructions = count;
+                        let count = count_str.parse().map_err(|e| CommandParseError { message: format!("Invalid instruction count: {}", e), help: None })?;
+                        instruction_count = count;
                     },
                     None => {
-                        print_help(&["disassemble"]);
-                        return Ok(())
+                        return Err(CommandParseError { message: String::new(), help: Some(HelpCategory::Disassemble) });
                     }
                 }
             },
             _ => {
-                print_help(&["disassemble"]);
-                return Ok(())
+                return Err(CommandParseError { message: String::new(), help: Some(HelpCategory::Disassemble) });
             }
         }
     }
 
-    print_disassembly(process, address, num_instructions)?;
+    Ok(DisassembleCommand { address, instruction_count })
+}
 
+fn handle_disassemble_command(cmd: DisassembleCommand, process: &mut Process) -> Result<(), DebuggerError> {
+    let address = cmd.address.unwrap_or(process.get_pc());
+    print_disassembly(process, address, cmd.instruction_count)?;
     Ok(())
 }
 
-fn handle_command(process: &mut Process, line: &str) -> Result<(), DebuggerError> {
+enum DebuggerCommand {
+    Continue,
+    Register(RegisterCommand),
+    Breakpoint(BreakpointCommand),
+    Step,
+    Memory(MemoryCommand),
+    Disassemble(DisassembleCommand),
+    Help(HelpCommand)
+}
+
+#[derive(Copy, Clone, Debug)]
+enum HelpCategory {
+    Breakpoint,
+    Disassemble,
+    Memory,
+    Register
+}
+
+impl FromStr for HelpCategory {
+    type Err = CommandParseError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if "breakpoint".starts_with(s) {
+            Ok(Self::Breakpoint)
+        } else if "disassemble".starts_with(s) {
+            Ok(Self::Disassemble)
+        } else if "memory".starts_with(s) {
+            Ok(Self::Memory)
+        } else if "register".starts_with(s) {
+            Ok(Self::Register)
+        } else {
+            Err(CommandParseError { message: String::from("No help available on that"), help: None })
+        }
+    }
+}
+
+struct HelpCommand {
+    help: Option<HelpCategory>
+}
+
+struct CommandParseError {
+    message: String,
+    help: Option<HelpCategory>
+}
+
+fn parse_help_command(command_args: &[&str]) -> Result<HelpCommand, CommandParseError> {
+    match command_args.first() {
+        None => { Ok(HelpCommand { help: None })},
+        Some(cmd) => {
+            let category = HelpCategory::from_str(cmd)?;
+            Ok(HelpCommand { help: Some(category) })
+        }
+    }
+}
+
+fn parse_command(line: &str) -> Result<DebuggerCommand, CommandParseError> {
     let mut args = line.split(' ');
     let command = args.next().expect("Expected at least one segment");
     let command_args: Vec<&str> = args.collect();
 
     if "continue".starts_with(command) {
-        process.resume()?;
-        let reason = process.wait_on_signal()?;
-        handle_stop(process, &reason)?;
-        Ok(())
+        Ok(DebuggerCommand::Continue)
     } else if "register".starts_with(command) {
-        handle_register_command(command_args.as_slice(), process);
-        Ok(())
+        let reg_cmd = parse_register_command(command_args.as_slice())?;
+        Ok(DebuggerCommand::Register(reg_cmd))
     } else if "breakpoint".starts_with(command) {
-        handle_breakpoint_command(command_args.as_slice(), process)?;
-        Ok(())
+        let breakpoint_cmd = parse_breakpoint_command(command_args.as_slice())?;
+        Ok(DebuggerCommand::Breakpoint(breakpoint_cmd))
     } else if "step".starts_with(command) {
-        let reason = process.step_instruction()?;
-        handle_stop(process, &reason)?;
-        Ok(())
+        Ok(DebuggerCommand::Step)
     } else if "memory".starts_with(command) {
-        handle_memory_command(command_args.as_slice(), process)
+        let mem_cmd = parse_memory_command(command_args.as_slice())?;
+        Ok(DebuggerCommand::Memory(mem_cmd))
     } else if "disassemble".starts_with(command) {
-        handle_disassemble_command(process, command_args.as_slice())
+        let dis_cmd = parse_disassemble_command(command_args.as_slice())?;
+        Ok(DebuggerCommand::Disassemble(dis_cmd))
     }
     else if "help".starts_with(command) {
-        print_help(command_args.as_slice());
-        Ok(())
+        let help = parse_help_command(command_args.as_slice())?;
+        Ok(DebuggerCommand::Help(help))
     }
     else {
-        Err(DebuggerError::InvalidCommand(command.to_string()))
+        Err(CommandParseError { message: format!("Invalid command '{}'", command), help: None })
+    }
+}
+
+fn handle_command(cmd: DebuggerCommand, process: &mut Process) -> Result<(), DebuggerError> {
+    match cmd {
+        DebuggerCommand::Continue => {
+            process.resume()?;
+            let reason = process.wait_on_signal()?;
+            handle_stop(process, &reason)?;
+            Ok(())
+        },
+        DebuggerCommand::Register(register_cmd) => {
+            handle_register_command(register_cmd, process)
+        },
+        DebuggerCommand::Breakpoint(breakpoint_cmd) => {
+            handle_breakpoint_command(breakpoint_cmd, process)
+        },
+        DebuggerCommand::Step => {
+            let reason = process.step_instruction()?;
+            handle_stop(process, &reason)?;
+            Ok(())
+        },
+        DebuggerCommand::Memory(memory_cmd) => {
+            handle_memory_command(memory_cmd, process)
+        },
+        DebuggerCommand::Disassemble(dis_cmd) => {
+            handle_disassemble_command(dis_cmd, process)
+        },
+        DebuggerCommand::Help(help_cmd) => {
+            print_help(help_cmd.help);
+            Ok(())
+        }
     }
 }
 
@@ -406,9 +556,17 @@ impl Debugger {
             };
 
             if let Some(cmd) = command_line {
-                let command_result = handle_command(&mut self.proc, cmd.as_str());
-                if let Err(e) = command_result {
-                    eprintln!("{}", e)
+                match parse_command(cmd.as_str()) {
+                    Ok(cmd) => {
+                        let command_result = handle_command(cmd, &mut self.proc);
+                        if let Err(e) = command_result {
+                            eprintln!("{}", e)
+                        }
+                    }
+                    Err(parse_err) => {
+                        eprintln!("{}", parse_err.message);
+                        print_help(parse_err.help)
+                    }
                 }
             }
         }
