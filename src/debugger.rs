@@ -1,5 +1,5 @@
 use std::fmt;
-use std::fmt::Debug;
+use std::fmt::{Debug, Formatter};
 use std::str::{FromStr};
 
 use rustyline;
@@ -16,7 +16,8 @@ use librsdb::disassembler::print_disassembly;
 pub enum DebuggerError {
     InputError(String),
     InteropError(Error),
-    UsageError
+    UsageError,
+    InvalidCommand(CommandParseError)
 }
 
 impl fmt::Display for DebuggerError {
@@ -30,6 +31,12 @@ impl fmt::Display for DebuggerError {
             },
             Self::UsageError => {
                 write!(f, "Usage: rsdb -p [pid] command")
+            },
+            Self::InvalidCommand(parse_error) => {
+                match parse_error.message.as_ref() {
+                    None => Ok(()),
+                    Some(msg) => write!(f, "{}", msg)
+                }
             }
         }
     }
@@ -42,6 +49,12 @@ impl From<Error> for DebuggerError {
 impl From<PIDParseError> for DebuggerError {
     fn from(e: PIDParseError) -> Self {
         Self::InputError(format!("Invalid PID: {:?}", e))
+    }
+}
+
+impl From<CommandParseError> for DebuggerError {
+    fn from(e: CommandParseError) -> Self {
+        Self::InvalidCommand(e)
     }
 }
 
@@ -61,46 +74,6 @@ fn attach(args: &[String]) -> Result<Process, DebuggerError> {
 
 fn print_stop_reason(process: &Process, reason: &StopReason) {
     println!("Process {} {}", process.pid(), reason)
-}
-
-fn print_help(category: Option<HelpCategory>) {
-    match category {
-        None => {
-            eprintln!("Available commands:");
-            eprintln!("  breakpoint  - Commands for operating on breakpoints");
-            eprintln!("  continue    - Resume the process");
-            eprintln!("  disassemble - Disassemble machine code to assembly");
-            eprintln!("  memory      - Commands for operating on memory");
-            eprintln!("  register    - Commands for operating on registers");
-            eprintln!("  step        - Step over a single instruction");
-        },
-        Some(HelpCategory::Breakpoint) => {
-            eprintln!("Available commands:");
-            eprintln!("  list");
-            eprintln!("  delete <id>");
-            eprintln!("  disable <id>");
-            eprintln!("  enable <id>");
-            eprintln!("  set <address>");
-        },
-        Some(HelpCategory::Disassemble) => {
-            eprintln!("Available options:");
-            eprintln!("  -c <number of instructions>");
-            eprintln!("  -a <start address>");
-        }
-        Some(HelpCategory::Memory) => {
-            eprintln!("Available commands:");
-            eprintln!("  read <address>");
-            eprintln!("  read <address> <num_bytes>");
-            eprintln!("  write <address> <bytes>");
-        },
-        Some(HelpCategory::Register) => {
-            eprintln!("Available commands:");
-            eprintln!("  read");
-            eprintln!("  read <register>");
-            eprintln!("  read all");
-            eprintln!("  write <register> <value>");
-        }
-    }
 }
 
 fn print_register_info(register: &RegisterInfo, value: Value) {
@@ -162,7 +135,7 @@ fn handle_register_command(cmd: RegisterCommand, process: &mut Process) -> Resul
 
 fn parse_register_write_command(args: &[&str]) -> Result<RegisterCommand, CommandParseError> {
     if args.len() < 2 {
-        Err(CommandParseError::show_help(HelpCategory::Register))
+        Err(CommandParseError::show_help(CommandType::Register))
     } else {
         let name = args[0];
         let value_str = args[1];
@@ -191,14 +164,14 @@ enum RegisterCommand {
 
 fn parse_register_command(args: &[&str]) -> Result<RegisterCommand, CommandParseError> {
     if args.is_empty() {
-        Err(CommandParseError::show_help(HelpCategory::Register))
+        Err(CommandParseError::show_help(CommandType::Register))
     } else if args[0].starts_with("read") {
         let read_cmd = parse_register_read_command(&args[1..])?;
         Ok(RegisterCommand::Read(read_cmd))
     } else if args[0].starts_with("write") {
         parse_register_write_command(&args[1..])
     } else {
-        Err(CommandParseError::show_help(HelpCategory::Register))
+        Err(CommandParseError::show_help(CommandType::Register))
     }
 }
 
@@ -212,7 +185,7 @@ enum BreakpointCommand {
 
 fn parse_breakpoint_command(args: &[&str]) -> Result<BreakpointCommand, CommandParseError> {
     if args.is_empty() {
-        return Err(CommandParseError::show_help(HelpCategory::Breakpoint));
+        return Err(CommandParseError::show_help(CommandType::Breakpoint));
     }
 
     let command = args[0];
@@ -222,7 +195,7 @@ fn parse_breakpoint_command(args: &[&str]) -> Result<BreakpointCommand, CommandP
     }
 
     if args.len() < 2 {
-        return Err(CommandParseError::show_help(HelpCategory::Breakpoint));
+        return Err(CommandParseError::show_help(CommandType::Breakpoint));
     }
 
     fn parse_id(id_str: &str) -> Result<u32, CommandParseError> {
@@ -243,7 +216,7 @@ fn parse_breakpoint_command(args: &[&str]) -> Result<BreakpointCommand, CommandP
         let id = parse_id(args[1])?;
         Ok(BreakpointCommand::Delete(id))
     } else {
-        Err(CommandParseError::new(format!("Unknown breakpoint command {}", command), HelpCategory::Breakpoint))
+        Err(CommandParseError::new(format!("Unknown breakpoint command {}", command), CommandType::Breakpoint))
     }
 }
 
@@ -312,7 +285,7 @@ fn parse_memory_write_command(args: &[&str]) -> Result<MemoryCommand, CommandPar
             .map_err(|e| CommandParseError::message(format!("Invalid data format: {}", e)))?;
         Ok(MemoryCommand::Write(addr, data))
     } else {
-        Err(CommandParseError::show_help(HelpCategory::Memory))
+        Err(CommandParseError::show_help(CommandType::Memory))
     }
 }
 
@@ -334,7 +307,7 @@ fn parse_memory_read_command(args: &[&str]) -> Result<MemoryCommand, CommandPars
 
 fn parse_memory_command(args: &[&str]) -> Result<MemoryCommand, CommandParseError> {
     if args.len() < 2 {
-        return Err(CommandParseError::show_help(HelpCategory::Memory));
+        return Err(CommandParseError::show_help(CommandType::Memory));
     }
 
     let memory_command = args[0];
@@ -344,7 +317,7 @@ fn parse_memory_command(args: &[&str]) -> Result<MemoryCommand, CommandParseErro
     } else if "write".starts_with(memory_command) {
         parse_memory_write_command(command_args)
     } else {
-        Err(CommandParseError::show_help(HelpCategory::Memory))
+        Err(CommandParseError::show_help(CommandType::Memory))
     }
 }
 
@@ -378,7 +351,7 @@ fn parse_disassemble_command(args: &[&str]) -> Result<DisassembleCommand, Comman
                         address = Some(addr)
                     },
                     None => {
-                        return Err(CommandParseError::show_help(HelpCategory::Disassemble));
+                        return Err(CommandParseError::show_help(CommandType::Disassemble));
                     }
                 }
             },
@@ -389,12 +362,12 @@ fn parse_disassemble_command(args: &[&str]) -> Result<DisassembleCommand, Comman
                         instruction_count = count;
                     },
                     None => {
-                        return Err(CommandParseError::show_help(HelpCategory::Disassemble));
+                        return Err(CommandParseError::show_help(CommandType::Disassemble));
                     }
                 }
             },
             _ => {
-                return Err(CommandParseError::show_help(HelpCategory::Disassemble));
+                return Err(CommandParseError::show_help(CommandType::Disassemble));
             }
         }
     }
@@ -408,35 +381,56 @@ fn handle_disassemble_command(cmd: DisassembleCommand, process: &mut Process) ->
     Ok(())
 }
 
-enum DebuggerCommand {
-    Continue,
-    Register(RegisterCommand),
-    Breakpoint(BreakpointCommand),
-    Step,
-    Memory(MemoryCommand),
-    Disassemble(DisassembleCommand),
-    Help(HelpCommand)
-}
-
-#[derive(Copy, Clone, Debug)]
-enum HelpCategory {
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+enum CommandType {
     Breakpoint,
+    Continue,
     Disassemble,
     Memory,
-    Register
+    Register,
+    Step,
+    Help
 }
 
-impl FromStr for HelpCategory {
+impl CommandType {
+    fn get_handler(self) -> Box<dyn Command> {
+        match self {
+            Self::Breakpoint => Box::new(BreakpointCommandHandler {}),
+            Self::Continue => Box::new(ContinueCommandHandler {}),
+            Self::Disassemble => Box::new(DisassembleCommandHandler {}),
+            Self::Memory => Box::new(MemoryCommandHandler {}),
+            Self::Register => Box::new(RegisterCommandHandler {}),
+            Self::Step => Box::new(StepCommandHandler {}),
+            Self::Help => Box::new(HelpCommandHandler {})
+        }
+    }
+}
+
+impl fmt::Display for CommandType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let mut s = format!("{:?}", self);
+        s.make_ascii_lowercase();
+        write!(f, "{}", s)
+    }
+}
+
+impl FromStr for CommandType {
     type Err = CommandParseError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if "breakpoint".starts_with(s) {
             Ok(Self::Breakpoint)
+        } else if "continue".starts_with(s) {
+            Ok(Self::Continue)
         } else if "disassemble".starts_with(s) {
             Ok(Self::Disassemble)
         } else if "memory".starts_with(s) {
             Ok(Self::Memory)
         } else if "register".starts_with(s) {
             Ok(Self::Register)
+        } else if "step".starts_with(s) {
+            Ok(Self::Step)
+        } else if "help".starts_with(s) {
+            Ok(Self::Help)
         } else {
             Err(CommandParseError::message(String::from("No help available on that")))
         }
@@ -444,16 +438,17 @@ impl FromStr for HelpCategory {
 }
 
 struct HelpCommand {
-    help: Option<HelpCategory>
+    help: Option<CommandType>
 }
 
-struct CommandParseError {
+#[derive(Clone, Debug)]
+pub struct CommandParseError {
     message: Option<String>,
-    help: Option<HelpCategory>
+    help: Option<CommandType>
 }
 
 impl CommandParseError {
-    fn show_help(category: HelpCategory) -> Self {
+    fn show_help(category: CommandType) -> Self {
         Self { message: None, help: Some(category) }
     }
 
@@ -461,7 +456,7 @@ impl CommandParseError {
         Self { message: Some(message), help: None }
     }
 
-    fn new(message: String, category: HelpCategory) -> Self {
+    fn new(message: String, category: CommandType) -> Self {
         Self { message: Some(message), help: Some(category) }
     }
 }
@@ -470,86 +465,62 @@ fn parse_help_command(command_args: &[&str]) -> Result<HelpCommand, CommandParse
     match command_args.first() {
         None => { Ok(HelpCommand { help: None })},
         Some(cmd) => {
-            let category = HelpCategory::from_str(cmd)?;
+            let category = CommandType::from_str(cmd)?;
             Ok(HelpCommand { help: Some(category) })
         }
     }
 }
 
-fn parse_command(line: &str) -> Result<DebuggerCommand, CommandParseError> {
+fn parse_command_type(line: &str) -> Result<(CommandType, Vec<&str>), CommandParseError> {
     let mut args = line.split(' ');
-    let command = args.next().expect("Expected at least one segment");
+    let command_name = args.next().expect("Expected at least one segment");
+    let command_type = CommandType::from_str(command_name)?;
     let command_args: Vec<&str> = args.collect();
 
-    if "continue".starts_with(command) {
-        Ok(DebuggerCommand::Continue)
-    } else if "register".starts_with(command) {
-        let reg_cmd = parse_register_command(command_args.as_slice())?;
-        Ok(DebuggerCommand::Register(reg_cmd))
-    } else if "breakpoint".starts_with(command) {
-        let breakpoint_cmd = parse_breakpoint_command(command_args.as_slice())?;
-        Ok(DebuggerCommand::Breakpoint(breakpoint_cmd))
-    } else if "step".starts_with(command) {
-        Ok(DebuggerCommand::Step)
-    } else if "memory".starts_with(command) {
-        let mem_cmd = parse_memory_command(command_args.as_slice())?;
-        Ok(DebuggerCommand::Memory(mem_cmd))
-    } else if "disassemble".starts_with(command) {
-        let dis_cmd = parse_disassemble_command(command_args.as_slice())?;
-        Ok(DebuggerCommand::Disassemble(dis_cmd))
-    }
-    else if "help".starts_with(command) {
-        let help = parse_help_command(command_args.as_slice())?;
-        Ok(DebuggerCommand::Help(help))
-    }
-    else {
-        Err(CommandParseError::message(format!("Invalid command '{}'", command)))
-    }
-}
-
-fn handle_command(cmd: DebuggerCommand, process: &mut Process) -> Result<(), DebuggerError> {
-    match cmd {
-        DebuggerCommand::Continue => {
-            process.resume()?;
-            let reason = process.wait_on_signal()?;
-            handle_stop(process, &reason)?;
-            Ok(())
-        },
-        DebuggerCommand::Register(register_cmd) => {
-            handle_register_command(register_cmd, process)
-        },
-        DebuggerCommand::Breakpoint(breakpoint_cmd) => {
-            handle_breakpoint_command(breakpoint_cmd, process)
-        },
-        DebuggerCommand::Step => {
-            let reason = process.step_instruction()?;
-            handle_stop(process, &reason)?;
-            Ok(())
-        },
-        DebuggerCommand::Memory(memory_cmd) => {
-            handle_memory_command(memory_cmd, process)
-        },
-        DebuggerCommand::Disassemble(dis_cmd) => {
-            handle_disassemble_command(dis_cmd, process)
-        },
-        DebuggerCommand::Help(help_cmd) => {
-            print_help(help_cmd.help);
-            Ok(())
-        }
-    }
+    Ok((command_type, command_args))
 }
 
 pub struct Debugger {
-    proc: Process
+    proc: Process,
+    commands: Vec<Box<dyn Command>>
 }
 
 impl Debugger {
+    fn get_commands() -> Vec<Box<dyn Command>> {
+        let mut commands: Vec<Box<dyn Command>> = Vec::new();
+        commands.push(Box::new(ContinueCommandHandler {}));
+        commands.push(Box::new(RegisterCommandHandler {}));
+        commands.push(Box::new(BreakpointCommandHandler {}));
+        commands.push(Box::new(ContinueCommandHandler {}));
+        commands.push(Box::new(MemoryCommandHandler {}));
+        commands.push(Box::new(DisassembleCommandHandler {}));
+        commands.push(Box::new(HelpCommandHandler {}));
+
+        commands
+    }
+
     pub fn launch(args: &[String]) -> Result<Self, DebuggerError> {
         if args.len() == 1 {
             Err(DebuggerError::UsageError)
         } else {
             let proc = attach(args)?;
-            Ok(Self { proc })
+            Ok(Self { proc, commands: Self::get_commands() })
+        }
+    }
+
+    pub fn process_mut(&mut self) -> &mut Process { &mut self.proc }
+
+    fn commands(&self) -> impl Iterator<Item=&dyn Command> {
+        self.commands.iter().map(|cmd| cmd.as_ref())
+    }
+
+    fn handle_command_parse_error(&self, e: CommandParseError) {
+        if let Some(message) = e.message {
+            eprintln!("{}", message);
+        }
+
+        if let Some(category) = e.help {
+            HelpCommandHandler::show_help(Some(category), self);
         }
     }
 
@@ -566,19 +537,186 @@ impl Debugger {
             };
 
             if let Some(cmd) = command_line {
-                match parse_command(cmd.as_str()) {
-                    Ok(cmd) => {
-                        let command_result = handle_command(cmd, &mut self.proc);
-                        if let Err(e) = command_result {
-                            eprintln!("{}", e)
+                match parse_command_type(cmd.as_str()) {
+                    Ok((command_type, args)) => {
+                        let handler = command_type.get_handler();
+                        let command_result = handler.exec(args.as_slice(), self);
+
+                        match command_result {
+                            Err(DebuggerError::InvalidCommand(parse_error)) => {
+                                self.handle_command_parse_error(parse_error)
+                            },
+                            Err(e) => {
+                                eprintln!("{}", e)
+                            },
+                            Ok(_) => { }
                         }
                     }
                     Err(parse_err) => {
-                        if let Some(message) = parse_err.message {
-                            eprintln!("{}", message);
-                        }
-                        print_help(parse_err.help)
+                        self.handle_command_parse_error(parse_err);
                     }
+                }
+            }
+        }
+    }
+}
+
+trait Command {
+    fn command_type(&self) -> CommandType;
+    fn exec(&self, args: &[&str], debugger: &mut Debugger) -> Result<(), DebuggerError>;
+
+    fn describe(&self);
+    fn summary(&self) -> &str;
+}
+
+struct ContinueCommandHandler {}
+impl Command for ContinueCommandHandler {
+    fn command_type(&self) -> CommandType { CommandType::Continue }
+
+    fn exec(&self, _args: &[&str], debugger: &mut Debugger) -> Result<(), DebuggerError> {
+        let process = debugger.process_mut();
+
+        process.resume()?;
+        let reason = process.wait_on_signal()?;
+        handle_stop(process, &reason)?;
+        Ok(())
+    }
+
+    fn describe(&self) {
+        eprintln!("Available commands: <none>");
+    }
+
+    fn summary(&self) -> &str { "Resume the process" }
+}
+
+struct RegisterCommandHandler { }
+impl Command for RegisterCommandHandler {
+    fn command_type(&self) -> CommandType { CommandType::Register }
+
+    fn exec(&self, args: &[&str], debugger: &mut Debugger) -> Result<(), DebuggerError> {
+        let cmd = parse_register_command(args)?;
+        handle_register_command(cmd, debugger.process_mut())
+    }
+
+    fn describe(&self) {
+        eprintln!("Available commands:");
+        eprintln!("  read");
+        eprintln!("  read <register>");
+        eprintln!("  read all");
+        eprintln!("  write <register> <value>");
+    }
+
+    fn summary(&self) -> &str { "Commands for operating on registers" }
+}
+
+struct BreakpointCommandHandler {}
+impl Command for BreakpointCommandHandler {
+    fn command_type(&self) -> CommandType { CommandType::Breakpoint }
+
+    fn exec(&self, args: &[&str], debugger: &mut Debugger) -> Result<(), DebuggerError> {
+        let cmd = parse_breakpoint_command(args)?;
+        handle_breakpoint_command(cmd, debugger.process_mut())
+    }
+
+    fn describe(&self) {
+        eprintln!("Available commands:");
+        eprintln!("  list");
+        eprintln!("  delete <id>");
+        eprintln!("  disable <id>");
+        eprintln!("  enable <id>");
+        eprintln!("  set <address>");
+    }
+
+    fn summary(&self) -> &str { "Commands for operating on breakpoints" }
+}
+
+struct StepCommandHandler {}
+impl Command for StepCommandHandler {
+    fn command_type(&self) -> CommandType { CommandType::Step }
+
+    fn exec(&self, _args: &[&str], debugger: &mut Debugger) -> Result<(), DebuggerError> {
+        let process = debugger.process_mut();
+        let reason = process.step_instruction()?;
+        handle_stop(process, &reason)?;
+        Ok(())
+    }
+
+    fn describe(&self) {
+        eprintln!("Available commands: <none>");
+    }
+
+    fn summary(&self) -> &str { "Step over a single instruction" }
+}
+
+struct MemoryCommandHandler {}
+impl Command for MemoryCommandHandler {
+    fn command_type(&self) -> CommandType { CommandType::Memory }
+
+    fn exec(&self, args: &[&str], debugger: &mut Debugger) -> Result<(), DebuggerError> {
+        let cmd = parse_memory_command(args)?;
+        handle_memory_command(cmd, debugger.process_mut())
+    }
+
+    fn describe(&self) {
+        eprintln!("Available commands:");
+        eprintln!("  read <address>");
+        eprintln!("  read <address> <num_bytes>");
+        eprintln!("  write <address> <bytes>");
+    }
+
+    fn summary(&self) -> &str { "Commands for operating on memory" }
+}
+
+struct DisassembleCommandHandler {}
+impl Command for DisassembleCommandHandler {
+    fn command_type(&self) -> CommandType {
+        CommandType::Disassemble
+    }
+
+    fn exec(&self, args: &[&str], debugger: &mut Debugger) -> Result<(), DebuggerError> {
+        let cmd = parse_disassemble_command(args)?;
+        handle_disassemble_command(cmd, debugger.process_mut())
+    }
+
+    fn describe(&self) {
+        eprintln!("Available options:");
+        eprintln!("  -c <number of instructions>");
+        eprintln!("  -a <start address>");
+    }
+
+    fn summary(&self) -> &str { "Disassemble machine code to assembly" }
+}
+
+struct HelpCommandHandler {}
+
+impl Command for HelpCommandHandler {
+    fn command_type(&self) -> CommandType { CommandType::Help }
+
+    fn exec(&self, args: &[&str], debugger: &mut Debugger) -> Result<(), DebuggerError> {
+        let cmd = parse_help_command(args)?;
+        Self::show_help(cmd.help, debugger);
+        Ok(())
+    }
+
+    fn describe(&self) {
+        eprintln!("Available commands:");
+        eprintln!("  <command name>");
+    }
+
+    fn summary(&self) -> &str { "Get help" }
+}
+
+impl HelpCommandHandler {
+    pub fn show_help(command_type_opt: Option<CommandType>, debugger: &Debugger) {
+        match command_type_opt {
+            Some(command_type) => {
+                let handler = command_type.get_handler();
+                handler.describe();
+            },
+            None => {
+                eprintln!("Available commands:");
+                for command in debugger.commands() {
+                    eprintln!("  {} - {}", command.command_type(), command.summary())
                 }
             }
         }
