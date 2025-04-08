@@ -16,7 +16,6 @@ use librsdb::disassembler::print_disassembly;
 pub enum DebuggerError {
     InputError(String),
     InteropError(Error),
-    InvalidCommand(String),
     UsageError
 }
 
@@ -28,9 +27,6 @@ impl fmt::Display for DebuggerError {
             },
             Self::InteropError(e) => {
                 write!(f, "{}", e)
-            },
-            Self::InvalidCommand(command) => {
-                write!(f, "Invalid command: {}", command)
             },
             Self::UsageError => {
                 write!(f, "Usage: rsdb -p [pid] command")
