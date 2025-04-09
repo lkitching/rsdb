@@ -1,5 +1,5 @@
 use std::str::FromStr;
-
+use librsdb::breakpoint_site::{BreakpointScope, BreakpointType};
 use crate::debugger::{Debugger, DebuggerError};
 use super::{Command, CommandType, CommandParseError};
 
@@ -10,7 +10,7 @@ use librsdb::parse;
 
 enum BreakpointCommand {
     List,
-    Set(VirtualAddress),
+    Set(VirtualAddress, BreakpointType),
     Enable(u32),
     Disable(u32),
     Delete(u32)
@@ -38,7 +38,17 @@ fn parse_breakpoint_command(args: &[&str]) -> Result<BreakpointCommand, CommandP
     if "set".starts_with(command) {
         let address = VirtualAddress::from_str(args[1])
             .map_err(|e| CommandParseError::message(format!("Breakpoint command expected address in hexadecimal: {}", e)))?;
-        Ok(BreakpointCommand::Set(address))
+        let breakpoint_type = if args.len() >= 3 {
+            if args[2] == "-h" {
+                BreakpointType::Hardware
+            } else {
+                return Err(CommandParseError::message(String::from("Invalid breakpoint command argument")));
+            }
+        } else {
+            BreakpointType::Software
+        };
+
+        Ok(BreakpointCommand::Set(address, breakpoint_type))
     } else if "enable".starts_with(command) {
         let id = parse_id(args[1])?;
         Ok(BreakpointCommand::Enable(id))
@@ -60,13 +70,13 @@ fn handle_breakpoint_command(cmd: BreakpointCommand, process: &mut Process) -> R
                 println!("No breakpoints set");
             } else {
                 println!("Current breakpoints:");
-                for bp in process.breakpoint_sites().iter() {
+                for bp in process.breakpoint_sites().iter().filter(|bp| bp.is_external()) {
                     println!("{}: address = {}, {}", bp.id(), bp.address(), if bp.is_enabled() { "enabled" } else { "disabled" });
                 }
             }
         },
-        BreakpointCommand::Set(addr) => {
-            let bp = process.create_breakpoint_site(addr)?;
+        BreakpointCommand::Set(addr, breakpoint_type) => {
+            let bp = process.create_breakpoint_site(addr, breakpoint_type, BreakpointScope::External)?;
             bp.enable()?;
         },
         BreakpointCommand::Enable(id) => {
@@ -99,6 +109,7 @@ impl Command for BreakpointCommandHandler {
         eprintln!("  disable <id>");
         eprintln!("  enable <id>");
         eprintln!("  set <address>");
+        eprintln!("  set <address> -h")
     }
 
     fn summary(&self) -> &str { "Commands for operating on breakpoints" }

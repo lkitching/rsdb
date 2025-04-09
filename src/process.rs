@@ -17,7 +17,7 @@ use crate::process::PIDParseError::OutOfRange;
 use crate::register::{RegisterId, Registers};
 use crate::types::{TryFromBytes, VirtualAddress};
 use crate::stoppoint_collection::{StopPoint, StopPointCollection};
-use crate::breakpoint_site::{BreakpointSite};
+use crate::breakpoint_site::{BreakpointScope, BreakpointSite, BreakpointType};
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum ProcessState {
@@ -321,11 +321,11 @@ impl Process {
         self.registers.write_by_id(RegisterId::rip, addr)
     }
 
-    pub fn create_breakpoint_site(&mut self, address: VirtualAddress) -> Result<&mut BreakpointSite, Error> {
+    pub fn create_breakpoint_site(&mut self, address: VirtualAddress, breakpoint_type: BreakpointType, scope: BreakpointScope) -> Result<&mut BreakpointSite, Error> {
         if self.breakpoint_sites.contains_address(address) {
             Err(Error::from_message(format!("Breakpoint site already created at address {}", address)))
         } else {
-            let bp = BreakpointSite::new(self.pid, address);
+            let bp = BreakpointSite::new(self.pid, address, breakpoint_type, scope);
             Ok(self.breakpoint_sites.push(bp))
         }
     }
@@ -372,7 +372,7 @@ impl Process {
         let address_range = address..(address + num_bytes as isize + 1);
         let sites = self.breakpoint_sites.get_in_region(&address_range);
 
-        for site in sites.filter(|sp| sp.is_enabled()) {
+        for site in sites.filter(|sp| sp.is_enabled() && sp.is_software()) {
             let offset = site.address() - address;
             memory[offset as usize] = site.saved_data()
         }
@@ -731,7 +731,7 @@ mod test {
     fn can_create_breakpoint_site_test() {
         let mut proc = Process::launch("target/debug/run_endlessly", true, StdoutReplacement::None).expect("Failed to launch process");
         let site_address = VirtualAddress::new(42);
-        let site = proc.create_breakpoint_site(site_address).expect("Failed to create breakpoint");
+        let site = proc.create_breakpoint_site(site_address, BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint");
 
         assert_eq!(site_address, site.address(), "Unexpected breakpoint address");
     }
@@ -741,25 +741,25 @@ mod test {
         let mut proc = Process::launch("target/debug/run_endlessly", true, StdoutReplacement::None).expect("Failed to launch process");
 
         let (s1_id, s1_addr) = {
-            let s1 = proc.create_breakpoint_site(VirtualAddress::new(42)).expect("Failed to create breakpoint s1");
+            let s1 = proc.create_breakpoint_site(VirtualAddress::new(42), BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint s1");
             (s1.id(), s1.address())
         };
         assert_eq!(VirtualAddress::new(42), s1_addr);
 
         let s2_id = {
-            let s2 = proc.create_breakpoint_site(VirtualAddress::new(43)).expect("Failed to create breakpoint s2");
+            let s2 = proc.create_breakpoint_site(VirtualAddress::new(43), BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint s2");
             s2.id()
         };
         assert_eq!(s2_id, s1_id + 1);
 
         let s3_id = {
-            let s3 = proc.create_breakpoint_site(VirtualAddress::new(44)).expect("Failed to create breakpoint s3");
+            let s3 = proc.create_breakpoint_site(VirtualAddress::new(44), BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint s3");
             s3.id()
         };
         assert_eq!(s3_id, s1_id + 2);
 
         let s4_id = {
-            let s4 = proc.create_breakpoint_site(VirtualAddress::new(45)).expect("Failed to create breakpoint s4");
+            let s4 = proc.create_breakpoint_site(VirtualAddress::new(45), BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint s4");
             s4.id()
         };
         assert_eq!(s4_id, s1_id + 3);
@@ -769,10 +769,10 @@ mod test {
     fn can_find_breakpoint_site_test() {
         let mut proc = Process::launch("target/debug/run_endlessly", true, StdoutReplacement::None).expect("Failed to launch process");
 
-        proc.create_breakpoint_site(VirtualAddress::new(42)).expect("Failed to create breakpoint 1");
-        proc.create_breakpoint_site(VirtualAddress::new(43)).expect("Failed to create breakpoint 2");
-        proc.create_breakpoint_site(VirtualAddress::new(44)).expect("Failed to create breakpoint 3");
-        proc.create_breakpoint_site(VirtualAddress::new(45)).expect("Failed to create breakpoint 4");
+        proc.create_breakpoint_site(VirtualAddress::new(42), BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint 1");
+        proc.create_breakpoint_site(VirtualAddress::new(43), BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint 2");
+        proc.create_breakpoint_site(VirtualAddress::new(44), BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint 3");
+        proc.create_breakpoint_site(VirtualAddress::new(45), BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint 4");
 
         let s1 = proc.breakpoint_sites.get_by_address(VirtualAddress::new(44)).expect("Failed to get breakpoint site 1");
         assert!(proc.breakpoint_sites().contains_address(VirtualAddress::new(44)), "Expected breakpoint to exist");
@@ -803,11 +803,11 @@ mod test {
         assert!(proc.breakpoint_sites().is_empty(), "Expected empty breakpoint list on launch");
         assert_eq!(0, proc.breakpoint_sites().len(), "Expected zero length breakpoint list on launch");
 
-        proc.create_breakpoint_site(VirtualAddress::new(42)).expect("Failed to create first breakpoint site");
+        proc.create_breakpoint_site(VirtualAddress::new(42), BreakpointType::Software, BreakpointScope::Internal).expect("Failed to create first breakpoint site");
         assert_eq!(false, proc.breakpoint_sites().is_empty(), "Expected non-empty breakpoint list after create");
         assert_eq!(1, proc.breakpoint_sites().len(), "Expected singleton breakpoint list after create");
 
-        proc.create_breakpoint_site(VirtualAddress::new(43)).expect("Failed to create second breakpoint site");
+        proc.create_breakpoint_site(VirtualAddress::new(43), BreakpointType::Software, BreakpointScope::Internal).expect("Failed to create second breakpoint site");
         assert_eq!(false, proc.breakpoint_sites.is_empty(), "Expected non-empty breakpoint list after second breakpoint created");
         assert_eq!(2, proc.breakpoint_sites().len(), "Expected breakpoint list of length 2 after second breakpoint created");
     }
@@ -817,10 +817,10 @@ mod test {
         let mut proc = Process::launch("target/debug/run_endlessly", true, StdoutReplacement::None).expect("Failed to launch process");
 
         {
-            proc.create_breakpoint_site(VirtualAddress::new(42)).expect("Failed to create breakpoint site 1");
-            proc.create_breakpoint_site(VirtualAddress::new(43)).expect("Failed to create breakpoint site 2");
-            proc.create_breakpoint_site(VirtualAddress::new(44)).expect("Failed to create breakpoint site 3");
-            proc.create_breakpoint_site(VirtualAddress::new(45)).expect("Failed to create breakpoint site 4");
+            proc.create_breakpoint_site(VirtualAddress::new(42), BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint site 1");
+            proc.create_breakpoint_site(VirtualAddress::new(43), BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint site 2");
+            proc.create_breakpoint_site(VirtualAddress::new(44), BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint site 3");
+            proc.create_breakpoint_site(VirtualAddress::new(45), BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint site 4");
         }
 
         {
@@ -844,7 +844,7 @@ mod test {
         let offset = get_entry_point_offset(Path::new(exec_path));
         let load_address = get_load_address(proc.pid(), offset);
 
-        let bp = proc.create_breakpoint_site(load_address).expect("Failed to create breakpoint");
+        let bp = proc.create_breakpoint_site(load_address, BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint");
         bp.enable().expect("Failed to enable breakpoint");
         proc.resume().expect("Failed to resume");
         let reason = proc.wait_on_signal().expect("Failed to wait");
@@ -871,9 +871,9 @@ mod test {
     fn can_remove_breakpoint_sites() {
         let mut proc = Process::launch("target/debug/hello_rsdb", true, StdoutReplacement::None).expect("Failed to launch process");
 
-        let bp1 = proc.create_breakpoint_site(VirtualAddress::new(42)).expect("Failed to create breakpoint site 1");
+        let bp1 = proc.create_breakpoint_site(VirtualAddress::new(42), BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint site 1");
         let bp1_id = bp1.id();
-        proc.create_breakpoint_site(VirtualAddress::new(43)).expect("Failed to create breakpoint site 2");
+        proc.create_breakpoint_site(VirtualAddress::new(43), BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint site 2");
         assert_eq!(2, proc.breakpoint_sites().len(), "Unexpected number of breakpoints after create");
 
         proc.breakpoint_sites_mut().remove_by_id(bp1_id);
