@@ -404,6 +404,11 @@ impl CommandType {
             Self::Help => Box::new(HelpCommandHandler {})
         }
     }
+
+    fn values() -> impl Iterator<Item=Self> {
+        [Self::Breakpoint, Self::Continue, Self::Disassemble, Self::Memory,
+         Self::Register, Self::Step, Self::Help].into_iter()
+    }
 }
 
 impl fmt::Display for CommandType {
@@ -482,37 +487,19 @@ fn parse_command_type(line: &str) -> Result<(CommandType, Vec<&str>), CommandPar
 
 pub struct Debugger {
     proc: Process,
-    commands: Vec<Box<dyn Command>>
 }
 
 impl Debugger {
-    fn get_commands() -> Vec<Box<dyn Command>> {
-        let mut commands: Vec<Box<dyn Command>> = Vec::new();
-        commands.push(Box::new(ContinueCommandHandler {}));
-        commands.push(Box::new(RegisterCommandHandler {}));
-        commands.push(Box::new(BreakpointCommandHandler {}));
-        commands.push(Box::new(ContinueCommandHandler {}));
-        commands.push(Box::new(MemoryCommandHandler {}));
-        commands.push(Box::new(DisassembleCommandHandler {}));
-        commands.push(Box::new(HelpCommandHandler {}));
-
-        commands
-    }
-
     pub fn launch(args: &[String]) -> Result<Self, DebuggerError> {
         if args.len() == 1 {
             Err(DebuggerError::UsageError)
         } else {
             let proc = attach(args)?;
-            Ok(Self { proc, commands: Self::get_commands() })
+            Ok(Self { proc })
         }
     }
 
     pub fn process_mut(&mut self) -> &mut Process { &mut self.proc }
-
-    fn commands(&self) -> impl Iterator<Item=&dyn Command> {
-        self.commands.iter().map(|cmd| cmd.as_ref())
-    }
 
     fn handle_command_parse_error(&self, e: CommandParseError) {
         if let Some(message) = e.message {
@@ -520,7 +507,7 @@ impl Debugger {
         }
 
         if let Some(category) = e.help {
-            HelpCommandHandler::show_help(Some(category), self);
+            HelpCommandHandler::show_help(Some(category));
         }
     }
 
@@ -562,7 +549,6 @@ impl Debugger {
 }
 
 trait Command {
-    fn command_type(&self) -> CommandType;
     fn exec(&self, args: &[&str], debugger: &mut Debugger) -> Result<(), DebuggerError>;
 
     fn describe(&self);
@@ -571,7 +557,6 @@ trait Command {
 
 struct ContinueCommandHandler {}
 impl Command for ContinueCommandHandler {
-    fn command_type(&self) -> CommandType { CommandType::Continue }
 
     fn exec(&self, _args: &[&str], debugger: &mut Debugger) -> Result<(), DebuggerError> {
         let process = debugger.process_mut();
@@ -591,8 +576,6 @@ impl Command for ContinueCommandHandler {
 
 struct RegisterCommandHandler { }
 impl Command for RegisterCommandHandler {
-    fn command_type(&self) -> CommandType { CommandType::Register }
-
     fn exec(&self, args: &[&str], debugger: &mut Debugger) -> Result<(), DebuggerError> {
         let cmd = parse_register_command(args)?;
         handle_register_command(cmd, debugger.process_mut())
@@ -611,8 +594,6 @@ impl Command for RegisterCommandHandler {
 
 struct BreakpointCommandHandler {}
 impl Command for BreakpointCommandHandler {
-    fn command_type(&self) -> CommandType { CommandType::Breakpoint }
-
     fn exec(&self, args: &[&str], debugger: &mut Debugger) -> Result<(), DebuggerError> {
         let cmd = parse_breakpoint_command(args)?;
         handle_breakpoint_command(cmd, debugger.process_mut())
@@ -632,8 +613,6 @@ impl Command for BreakpointCommandHandler {
 
 struct StepCommandHandler {}
 impl Command for StepCommandHandler {
-    fn command_type(&self) -> CommandType { CommandType::Step }
-
     fn exec(&self, _args: &[&str], debugger: &mut Debugger) -> Result<(), DebuggerError> {
         let process = debugger.process_mut();
         let reason = process.step_instruction()?;
@@ -650,8 +629,6 @@ impl Command for StepCommandHandler {
 
 struct MemoryCommandHandler {}
 impl Command for MemoryCommandHandler {
-    fn command_type(&self) -> CommandType { CommandType::Memory }
-
     fn exec(&self, args: &[&str], debugger: &mut Debugger) -> Result<(), DebuggerError> {
         let cmd = parse_memory_command(args)?;
         handle_memory_command(cmd, debugger.process_mut())
@@ -669,10 +646,6 @@ impl Command for MemoryCommandHandler {
 
 struct DisassembleCommandHandler {}
 impl Command for DisassembleCommandHandler {
-    fn command_type(&self) -> CommandType {
-        CommandType::Disassemble
-    }
-
     fn exec(&self, args: &[&str], debugger: &mut Debugger) -> Result<(), DebuggerError> {
         let cmd = parse_disassemble_command(args)?;
         handle_disassemble_command(cmd, debugger.process_mut())
@@ -690,11 +663,9 @@ impl Command for DisassembleCommandHandler {
 struct HelpCommandHandler {}
 
 impl Command for HelpCommandHandler {
-    fn command_type(&self) -> CommandType { CommandType::Help }
-
-    fn exec(&self, args: &[&str], debugger: &mut Debugger) -> Result<(), DebuggerError> {
+    fn exec(&self, args: &[&str], _debugger: &mut Debugger) -> Result<(), DebuggerError> {
         let cmd = parse_help_command(args)?;
-        Self::show_help(cmd.help, debugger);
+        Self::show_help(cmd.help);
         Ok(())
     }
 
@@ -707,16 +678,25 @@ impl Command for HelpCommandHandler {
 }
 
 impl HelpCommandHandler {
-    pub fn show_help(command_type_opt: Option<CommandType>, debugger: &Debugger) {
+    pub fn show_help(command_type_opt: Option<CommandType>) {
         match command_type_opt {
             Some(command_type) => {
                 let handler = command_type.get_handler();
                 handler.describe();
             },
             None => {
+                let mut commands: Vec<(CommandType, String)> = CommandType::values().map(|ct| (ct, ct.to_string())).collect();
+                commands.sort_by(|(_, name1), (_, name2)| name1.cmp(name2));
+                let (_, longest_name) = commands.iter().max_by_key(|(_, name)| name.len()).expect("Expected command handler");
+                let longest_name_len = longest_name.len();
+
                 eprintln!("Available commands:");
-                for command in debugger.commands() {
-                    eprintln!("  {} - {}", command.command_type(), command.summary())
+                for (cmd_type, name) in commands {
+                    let handler = cmd_type.get_handler();
+                    let padding_len = longest_name_len - name.len();
+                    let padding = String::from_iter(std::iter::repeat(' ').take(padding_len));
+
+                    eprintln!("  {}{} - {}", name, padding, handler.summary())
                 }
             }
         }
