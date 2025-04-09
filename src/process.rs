@@ -14,8 +14,8 @@ use crate::interop;
 use crate::interop::{ptrace, ForkResult};
 use crate::pipe::Pipe;
 use crate::process::PIDParseError::OutOfRange;
-use crate::register::{RegisterId, Registers};
-use crate::types::{TryFromBytes, VirtualAddress};
+use crate::register::{debug_register_index, RegisterId, Registers};
+use crate::types::{StoppointMode, TryFromBytes, VirtualAddress};
 use crate::stoppoint_collection::{StopPoint, StopPointCollection};
 use crate::breakpoint_site::{BreakpointScope, BreakpointSite, BreakpointType};
 
@@ -332,6 +332,70 @@ impl Process {
 
     pub fn breakpoint_sites(&self) -> &StopPointCollection<BreakpointSite> { &self.breakpoint_sites }
     pub fn breakpoint_sites_mut(&mut self) -> &mut StopPointCollection<BreakpointSite> { &mut self.breakpoint_sites }
+
+    pub fn set_hardware_breakpoint(&mut self, id: <BreakpointSite as StopPoint>::IdType, address: VirtualAddress) -> Result<u8, Error> {
+        self.set_hardware_stoppoint(address, StoppointMode::Execute, 1)
+    }
+    fn set_hardware_stoppoint(&mut self, address: VirtualAddress, mode: StoppointMode, size: usize) -> Result<u8, Error> {
+        let control: u64 = self.registers().read_by_id_as(RegisterId::dr7);
+
+        let reg_index = self.find_free_stoppoint_register(control)?;
+        let debug_register = debug_register_index(reg_index);
+
+        let updated_control = {
+            let mode_flag = Self::encode_hardware_stoppoint_mode(mode);
+            let size_flag = Self::encode_hardware_stoppoint_size(size);
+
+            let enable_bit: u64 = 1 << (reg_index * 2);
+            let mode_bits: u64 = mode_flag << (reg_index * 4 + 16);
+            let size_bits: u64 = size_flag << (reg_index * 4 + 18);
+            let clear_mask: u64 = (0b11 << (reg_index * 2)) | (0b1111 << (reg_index * 4 + 16));
+            let reset_control = control & !clear_mask;
+
+            reset_control | enable_bit | mode_bits | size_bits
+        };
+
+        {
+            let regs = self.registers_mut();
+
+            // write address into debug register
+            regs.write_by_id(debug_register, address)?;
+
+            // update control register
+            regs.write_by_id(RegisterId::dr7, updated_control)?;
+        }
+
+        Ok(reg_index)
+    }
+
+    fn encode_hardware_stoppoint_mode(mode: StoppointMode) -> u64 {
+        match mode {
+            StoppointMode::Write => 0b01,
+            StoppointMode::ReadWrite => 0b11,
+            StoppointMode::Execute => 0b00
+        }
+    }
+
+    fn encode_hardware_stoppoint_size(size: usize) -> u64 {
+        match size {
+            1 => 0b00,
+            2 => 0b01,
+            4 => 0b11,
+            8 => 0b10,
+            _ => panic!("Invalid stoppoint size {}", size)
+        }
+    }
+
+    fn find_free_stoppoint_register(&self, control_reg: u64) -> Result<u8, Error> {
+        for i in 0..4 {
+            let enabled_mask = 0b11 << (i * 2);
+            if control_reg & enabled_mask == 0 {
+                return Ok(i)
+            }
+        }
+
+        Err(Error::from_message(String::from("No remaining hardware debug registers")))
+    }
 
     pub fn read_memory(&self, address: VirtualAddress, num_bytes: usize) -> Result<Vec<u8>, Error> {
         let mut ret = vec![0u8; num_bytes];

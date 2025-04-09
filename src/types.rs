@@ -576,6 +576,13 @@ impl FromStr for VirtualAddress {
     }
 }
 
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum StoppointMode {
+    Write,
+    ReadWrite,
+    Execute
+}
+
 #[cfg(test)]
 mod test {
     use super::*;

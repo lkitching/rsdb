@@ -138,6 +138,16 @@ pub fn debug_register_infos() -> impl Iterator<Item=&'static RegisterInfo> {
     REGISTER_INFOS.iter().skip_while(|info| info.id != RegisterId::dr0).take(8)
 }
 
+pub fn debug_register_index(index: u8) -> RegisterId {
+    match index {
+        0 => RegisterId::dr0,
+        1 => RegisterId::dr1,
+        2 => RegisterId::dr2,
+        3 => RegisterId::dr3,
+        _ => panic!("Invalid debug register index")
+    }
+}
+
 fn widen<T: TryWiden>(register_info: &RegisterInfo, v: T) -> Result<Value, RegisterSizeError> {
     v.try_widen(register_info.size)
 }
