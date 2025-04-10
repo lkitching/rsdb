@@ -5,8 +5,7 @@ use libc::{pid_t};
 
 use crate::types::VirtualAddress;
 use crate::stoppoint_collection::{StopPoint};
-use crate::error::Error;
-use crate::interop::ptrace;
+use crate::register::DebugRegisterIndex;
 
 static ID_COUNTER: AtomicU32 = AtomicU32::new(1);
 
@@ -29,7 +28,7 @@ pub struct BreakpointSite {
     saved_data: u8,
     _type: BreakpointType,
     scope: BreakpointScope,
-    hardware_register_index: Option<u8>
+    hardware_register_index: Option<DebugRegisterIndex>
 }
 
 impl BreakpointSite {
@@ -44,41 +43,13 @@ impl BreakpointSite {
     pub fn breakpoint_type(&self) -> BreakpointType { self._type }
     pub fn scope(&self) -> BreakpointScope { self.scope }
 
-    pub fn enable(&mut self) -> Result<(), Error> {
-        if self.is_enabled {
-            return Ok(());
-        }
-
-        match self._type {
-            BreakpointType::Hardware => {
-                // let register_index = process.set_hardware_breakpoint(self.id, self.address)?;
-                // self.hardware_register_index = Some(register_index)
-            },
-            BreakpointType::Software => {
-                let data = ptrace::peek_data(self.pid, self.address).map_err(|e| e.with_context("Failed to enable breakpoint site"))?;
-
-                // mask off all but low byte and save
-                self.saved_data = (data & 0xFF) as u8;
-
-                // set lower byte of data to 0xCC
-                let data_with_int3 = (data & !0xFF) | 0xCC;
-                ptrace::poke_data(self.pid, self.address, data_with_int3)?;
-            }
-        }
-
-        self.is_enabled = true;
-        Ok(())
-    }
-
     pub fn set_enabled(&mut self) { self.is_enabled = true; }
     pub fn set_disabled(&mut self) { self.is_enabled = false; }
     pub fn save(&mut self, data: u8) { self.saved_data = data; }
 
-    pub fn set_hardware_index(&mut self, hardware_index: u8) { self.hardware_register_index = Some(hardware_index); }
-    pub fn hardware_index(&self) -> Option<u8> { self.hardware_register_index }
+    pub fn set_hardware_index(&mut self, hardware_index: DebugRegisterIndex) { self.hardware_register_index = Some(hardware_index); }
+    pub fn hardware_index(&self) -> Option<DebugRegisterIndex> { self.hardware_register_index }
     pub fn clear_hardware_index(&mut self) { self.hardware_register_index = None; }
-
-
 
     pub fn saved_data(&self) -> u8 {
         self.saved_data
