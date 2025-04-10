@@ -77,15 +77,13 @@ fn handle_breakpoint_command(cmd: BreakpointCommand, process: &mut Process) -> R
         },
         BreakpointCommand::Set(addr, breakpoint_type) => {
             let bp = process.create_breakpoint_site(addr, breakpoint_type, BreakpointScope::External)?;
-            bp.enable()?;
+            process.enable_breakpoint(bp)?;
         },
         BreakpointCommand::Enable(id) => {
-            let bp = process.breakpoint_sites_mut().get_by_id_mut(id)?;
-            bp.enable()?;
+            process.enable_breakpoint(id)?;
         },
         BreakpointCommand::Disable(id) => {
-            let bp = process.breakpoint_sites_mut().get_by_id_mut(id)?;
-            bp.disable()?;
+            process.disable_breakpoint(id)?;
         },
         BreakpointCommand::Delete(id) => {
             process.breakpoint_sites_mut().remove_by_id(id);

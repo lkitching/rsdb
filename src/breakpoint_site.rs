@@ -7,8 +7,6 @@ use crate::types::VirtualAddress;
 use crate::stoppoint_collection::{StopPoint};
 use crate::error::Error;
 use crate::interop::ptrace;
-use crate::process::Process;
-use crate::register::Registers;
 
 static ID_COUNTER: AtomicU32 = AtomicU32::new(1);
 
@@ -43,6 +41,8 @@ impl BreakpointSite {
     pub fn address(&self) -> VirtualAddress {
         self.address
     }
+    pub fn breakpoint_type(&self) -> BreakpointType { self._type }
+    pub fn scope(&self) -> BreakpointScope { self.scope }
 
     pub fn enable(&mut self) -> Result<(), Error> {
         if self.is_enabled {
@@ -70,30 +70,15 @@ impl BreakpointSite {
         Ok(())
     }
 
-    pub fn disable(&mut self) -> Result<(), Error> {
-        if self.is_disabled() {
-            return Ok(());
-        }
+    pub fn set_enabled(&mut self) { self.is_enabled = true; }
+    pub fn set_disabled(&mut self) { self.is_enabled = false; }
+    pub fn save(&mut self, data: u8) { self.saved_data = data; }
 
-        match self._type {
-            BreakpointType::Hardware => {
+    pub fn set_hardware_index(&mut self, hardware_index: u8) { self.hardware_register_index = Some(hardware_index); }
+    pub fn hardware_index(&self) -> Option<u8> { self.hardware_register_index }
+    pub fn clear_hardware_index(&mut self) { self.hardware_register_index = None; }
 
-            },
-            BreakpointType::Software => {
-                // read word at breakpoint address
-                let data = ptrace::peek_data(self.pid, self.address)?;
 
-                // clear low byte and restore saved data into it
-                let restored_data = (data & !0xFF) | (self.saved_data as usize);
-
-                // write resulting word back into memory
-                ptrace::poke_data(self.pid, self.address, restored_data)?;
-            }
-        }
-
-        self.is_enabled = false;
-        Ok(())
-    }
 
     pub fn saved_data(&self) -> u8 {
         self.saved_data
