@@ -7,6 +7,8 @@ use crate::types::VirtualAddress;
 use crate::stoppoint_collection::{StopPoint};
 use crate::error::Error;
 use crate::interop::ptrace;
+use crate::process::Process;
+use crate::register::Registers;
 
 static ID_COUNTER: AtomicU32 = AtomicU32::new(1);
 
@@ -49,7 +51,8 @@ impl BreakpointSite {
 
         match self._type {
             BreakpointType::Hardware => {
-                unimplemented!()
+                // let register_index = process.set_hardware_breakpoint(self.id, self.address)?;
+                // self.hardware_register_index = Some(register_index)
             },
             BreakpointType::Software => {
                 let data = ptrace::peek_data(self.pid, self.address).map_err(|e| e.with_context("Failed to enable breakpoint site"))?;

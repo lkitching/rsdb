@@ -339,7 +339,7 @@ impl Process {
     fn set_hardware_stoppoint(&mut self, address: VirtualAddress, mode: StoppointMode, size: usize) -> Result<u8, Error> {
         let control: u64 = self.registers().read_by_id_as(RegisterId::dr7);
 
-        let reg_index = self.find_free_stoppoint_register(control)?;
+        let reg_index = Self::find_free_stoppoint_register(control)?;
         let debug_register = debug_register_index(reg_index);
 
         let updated_control = {
@@ -356,16 +356,30 @@ impl Process {
         };
 
         {
-            let regs = self.registers_mut();
+            let registers = self.registers_mut();
 
             // write address into debug register
-            regs.write_by_id(debug_register, address)?;
+            registers.write_by_id(debug_register, address)?;
 
             // update control register
-            regs.write_by_id(RegisterId::dr7, updated_control)?;
+            registers.write_by_id(RegisterId::dr7, updated_control)?;
         }
 
         Ok(reg_index)
+    }
+
+    fn clear_hardware_stoppoint(&mut self, register_index: u8) -> Result<(), Error> {
+        let register_id = debug_register_index(register_index);
+        self.registers_mut().write_by_id(register_id, 0u64)?;
+
+        let control: u64 = self.registers.read_by_id_as(register_id);
+
+        let updated_control = {
+            let clear_mask: u64 = (0b11 << (register_index * 2)) | (0b1111 << (register_index * 4 + 16));
+            control & !clear_mask
+        };
+
+        self.registers_mut().write_by_id(register_id, updated_control)
     }
 
     fn encode_hardware_stoppoint_mode(mode: StoppointMode) -> u64 {
@@ -386,7 +400,7 @@ impl Process {
         }
     }
 
-    fn find_free_stoppoint_register(&self, control_reg: u64) -> Result<u8, Error> {
+    fn find_free_stoppoint_register(control_reg: u64) -> Result<u8, Error> {
         for i in 0..4 {
             let enabled_mask = 0b11 << (i * 2);
             if control_reg & enabled_mask == 0 {
