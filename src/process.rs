@@ -343,7 +343,7 @@ impl Process {
         if self.breakpoint_sites.contains_address(address) {
             Err(Error::from_message(format!("Breakpoint site already created at address {}", address)))
         } else {
-            let bp = BreakpointSite::new(self.pid, address, breakpoint_type, scope);
+            let bp = BreakpointSite::new(address, breakpoint_type, scope);
             let id = bp.id();
             self.breakpoint_sites.push(bp);
             Ok(id)

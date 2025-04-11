@@ -1,8 +1,6 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::ops::Range;
 
-use libc::{pid_t};
-
 use crate::types::VirtualAddress;
 use crate::stoppoint_collection::{StopPoint};
 use crate::register::DebugRegisterIndex;
@@ -22,7 +20,6 @@ pub enum BreakpointScope { Internal, External }
 
 pub struct BreakpointSite {
     id: u32,
-    pid: pid_t,
     address: VirtualAddress,
     is_enabled: bool,
     saved_data: u8,
@@ -32,9 +29,9 @@ pub struct BreakpointSite {
 }
 
 impl BreakpointSite {
-    pub fn new(pid: pid_t, address: VirtualAddress, breakpoint_type: BreakpointType, scope: BreakpointScope) -> Self {
+    pub fn new(address: VirtualAddress, breakpoint_type: BreakpointType, scope: BreakpointScope) -> Self {
         let id = get_next_id();
-        Self { id, pid, address, is_enabled: false, saved_data: 0, scope, _type: breakpoint_type, hardware_register_index: None }
+        Self { id, address, is_enabled: false, saved_data: 0, scope, _type: breakpoint_type, hardware_register_index: None }
     }
 
     pub fn address(&self) -> VirtualAddress {
