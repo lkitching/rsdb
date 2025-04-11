@@ -588,6 +588,29 @@ pub enum StoppointMode {
     Execute
 }
 
+impl fmt::Display for StoppointMode {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Write => write!(f, "write"),
+            Self::ReadWrite => write!(f, "read_write"),
+            Self::Execute => write!(f, "execute")
+        }
+    }
+}
+
+impl FromStr for StoppointMode {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "write" => Ok(Self::Write),
+            "read_write" => Ok(Self::ReadWrite),
+            "rw" => Ok(Self::ReadWrite),
+            "execute" => Ok(Self::Execute),
+            _ => Err(())
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;

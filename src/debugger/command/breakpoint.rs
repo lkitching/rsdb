@@ -1,7 +1,6 @@
-use std::str::FromStr;
 use librsdb::breakpoint_site::{BreakpointScope, BreakpointType};
 use crate::debugger::{Debugger, DebuggerError};
-use super::{Command, CommandType, CommandParseError};
+use super::{Command, CommandType, CommandParseError, parse_address};
 
 use librsdb::types::{VirtualAddress};
 use librsdb::process::{Process};
@@ -36,8 +35,7 @@ fn parse_breakpoint_command(args: &[&str]) -> Result<BreakpointCommand, CommandP
     }
 
     if "set".starts_with(command) {
-        let address = VirtualAddress::from_str(args[1])
-            .map_err(|e| CommandParseError::message(format!("Breakpoint command expected address in hexadecimal: {}", e)))?;
+        let address = parse_address(args[1])?;
         let breakpoint_type = if args.len() >= 3 {
             if args[2] == "-h" {
                 BreakpointType::Hardware

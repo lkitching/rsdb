@@ -451,6 +451,14 @@ impl Process {
         Ok(())
     }
 
+    pub fn remove_watchpoint_by_id(&mut self, id: <WatchPoint as StopPoint>::IdType) -> Result<(), Error> {
+        // ensure watchpoint exists
+        let wp_id = self.watchpoints.get_by_id(id)?.id();
+        self.disable_watchpoint(wp_id)?;
+        self.watchpoints.remove_by_id(wp_id);
+        Ok(())
+    }
+
     pub fn remove_breakpoint_by_id(&mut self, id: <BreakpointSite as StopPoint>::IdType) -> Result<(), Error> {
         let bp = self.breakpoint_sites.get_by_id(id)?;
         self.disable_breakpoint(bp.id())?;
@@ -466,7 +474,8 @@ impl Process {
     }
 
     pub fn breakpoint_sites(&self) -> &StopPointCollection<BreakpointSite> { &self.breakpoint_sites }
-    pub fn breakpoint_sites_mut(&mut self) -> &mut StopPointCollection<BreakpointSite> { &mut self.breakpoint_sites }
+    //pub fn breakpoint_sites_mut(&mut self) -> &mut StopPointCollection<BreakpointSite> { &mut self.breakpoint_sites }
+    pub fn watchpoints(&self) -> &StopPointCollection<WatchPoint> { &self.watchpoints }
 
     pub fn set_hardware_breakpoint(registers: &mut Registers, _id: <BreakpointSite as StopPoint>::IdType, address: VirtualAddress) -> Result<DebugRegisterIndex, Error> {
         Self::set_hardware_stoppoint(registers, address, StoppointMode::Execute, 1)

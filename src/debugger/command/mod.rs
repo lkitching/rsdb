@@ -5,6 +5,7 @@ mod step;
 mod memory;
 mod disassemble;
 mod help;
+mod watchpoint;
 
 use std::fmt::{self, Formatter};
 use std::str::FromStr;
@@ -21,6 +22,8 @@ use step::StepCommandHandler;
 use memory::MemoryCommandHandler;
 use disassemble::DisassembleCommandHandler;
 pub use help::HelpCommandHandler;
+use librsdb::types::VirtualAddress;
+use crate::debugger::command::watchpoint::WatchpointCommandHandler;
 
 pub trait Command {
     fn exec(&self, args: &[&str], debugger: &mut Debugger) -> Result<(), DebuggerError>;
@@ -37,6 +40,7 @@ pub enum CommandType {
     Memory,
     Register,
     Step,
+    Watchpoint,
     Help
 }
 
@@ -49,13 +53,14 @@ impl CommandType {
             Self::Memory => Box::new(MemoryCommandHandler {}),
             Self::Register => Box::new(RegisterCommandHandler {}),
             Self::Step => Box::new(StepCommandHandler {}),
+            Self::Watchpoint => Box::new(WatchpointCommandHandler {}),
             Self::Help => Box::new(HelpCommandHandler {})
         }
     }
 
     fn values() -> impl Iterator<Item=Self> {
         [Self::Breakpoint, Self::Continue, Self::Disassemble, Self::Memory,
-            Self::Register, Self::Step, Self::Help].into_iter()
+            Self::Register, Self::Step, Self::Watchpoint, Self::Help].into_iter()
     }
 }
 
@@ -82,6 +87,8 @@ impl FromStr for CommandType {
             Ok(Self::Register)
         } else if "step".starts_with(s) {
             Ok(Self::Step)
+        } else if "watchpoint".starts_with(s) {
+            Ok(Self::Watchpoint)
         } else if "help".starts_with(s) {
             Ok(Self::Help)
         } else {
@@ -121,4 +128,9 @@ fn handle_stop(process: &Process, reason: &StopReason) -> Result<(), Error> {
     } else {
         Ok(())
     }
+}
+
+pub fn parse_address(addr_str: &str) -> Result<VirtualAddress, CommandParseError> {
+    VirtualAddress::from_str(addr_str)
+        .map_err(|e| CommandParseError::message(format!("Address expected in hexadecimal: {}", e)))
 }
