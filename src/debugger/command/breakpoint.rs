@@ -86,7 +86,7 @@ fn handle_breakpoint_command(cmd: BreakpointCommand, process: &mut Process) -> R
             process.disable_breakpoint(id)?;
         },
         BreakpointCommand::Delete(id) => {
-            process.breakpoint_sites_mut().remove_by_id(id);
+            process.remove_breakpoint_by_id(id)?;
         }
     }
 

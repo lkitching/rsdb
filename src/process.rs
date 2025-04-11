@@ -393,6 +393,20 @@ impl Process {
         Ok(())
     }
 
+    pub fn remove_breakpoint_by_id(&mut self, id: <BreakpointSite as StopPoint>::IdType) -> Result<(), Error> {
+        let bp = self.breakpoint_sites.get_by_id(id)?;
+        self.disable_breakpoint(bp.id())?;
+        self.breakpoint_sites.remove_by_id(id);
+        Ok(())
+    }
+
+    pub fn remove_breakpoint_by_address(&mut self, address: VirtualAddress) -> Result<(), Error> {
+        let bp_id = self.breakpoint_sites.get_by_address(address)?.id();
+        self.disable_breakpoint(bp_id)?;
+        self.breakpoint_sites.remove_by_id(bp_id);
+        Ok(())
+    }
+
     pub fn breakpoint_sites(&self) -> &StopPointCollection<BreakpointSite> { &self.breakpoint_sites }
     pub fn breakpoint_sites_mut(&mut self) -> &mut StopPointCollection<BreakpointSite> { &mut self.breakpoint_sites }
 
@@ -976,8 +990,8 @@ mod test {
         proc.create_breakpoint_site(VirtualAddress::new(43), BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint site 2");
         assert_eq!(2, proc.breakpoint_sites().len(), "Unexpected number of breakpoints after create");
 
-        proc.breakpoint_sites_mut().remove_by_id(bp1_id);
-        proc.breakpoint_sites_mut().remove_by_address(VirtualAddress::new(43));
+        proc.remove_breakpoint_by_id(bp1_id).expect("Failed to remove breakpoint by id");
+        proc.remove_breakpoint_by_address(VirtualAddress::new(43)).expect("Failed to remove breakpoint by address");
         assert!(proc.breakpoint_sites().is_empty(), "Expected breakpoints to be removed");
     }
 
@@ -1024,6 +1038,64 @@ mod test {
         channel.read_to_string(&mut written)?;
 
         assert_eq!(message, written, "Unexpected message after memory write");
+
+        Ok(())
+    }
+
+    #[test]
+    fn hardware_breakpoint_evades_memory_checksums() -> Result<(), Error> {
+        let close_on_exec = false;
+        let mut channel = Pipe::create(close_on_exec)?;
+        let mut proc = Process::launch("target/debug/anti_debugger", true, StdoutReplacement::Fd(channel.write_fd()))?;
+        channel.close_write();
+
+        proc.resume()?;
+        proc.wait_on_signal()?;
+
+        let func = {
+            let mut bytes = [0u8; size_of::<usize>()];
+            channel.read(bytes.as_mut_slice())?;
+            VirtualAddress::from_le_bytes(bytes)
+        };
+
+        let soft = proc.create_breakpoint_site(func, BreakpointType::Software, BreakpointScope::External)?;
+        proc.enable_breakpoint(soft)?;
+
+        proc.resume()?;
+        proc.wait_on_signal()?;
+
+        {
+            let mut buf = [0u8; 100];
+            let bytes_read = channel.read(buf.as_mut_slice())?;
+            let s = String::from_utf8_lossy(&buf[0..bytes_read]).to_string();
+
+            assert_eq!("Putting pepperoni on pizza", s.trim(), "Unexpected message after software breakpoint");
+        }
+
+        // delete software breakpoint and replace with hardware breakpoint
+        proc.remove_breakpoint_by_id(soft)?;
+        assert!(proc.breakpoint_sites.is_empty(), "Expected breakpoint to be deleted");
+
+        let hard = proc.create_breakpoint_site(func, BreakpointType::Hardware, BreakpointScope::External)?;
+        proc.enable_breakpoint(hard)?;
+
+        proc.resume()?;
+        proc.wait_on_signal()?;
+
+        // should break on hardware breakpoint
+        let pc = proc.get_pc();
+        assert_eq!(func, pc, "Expected to break on hardware breakpoint");
+
+        proc.resume()?;
+        proc.wait_on_signal()?;
+
+        {
+            let mut buf = [0u8; 100];
+            let bytes_read = channel.read(buf.as_mut_slice())?;
+            let s = String::from_utf8_lossy(&buf[0..bytes_read]).to_string();
+
+            assert_eq!("Putting pineapple on pizza", s.trim(), "Unexpected message after hardware breakpoint");
+        }
 
         Ok(())
     }

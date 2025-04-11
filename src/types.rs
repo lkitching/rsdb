@@ -479,6 +479,11 @@ impl VirtualAddress {
         Self { addr }
     }
     pub fn addr(&self) -> usize { self.addr }
+
+    pub fn from_le_bytes(bytes: [u8; size_of::<usize>()]) -> Self {
+        let addr = usize::from_le_bytes(bytes);
+        Self::new(addr)
+    }
 }
 
 impl From<usize> for VirtualAddress {
