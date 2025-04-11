@@ -18,6 +18,7 @@ use crate::register::{RegisterId, Registers, DebugRegisterIndex};
 use crate::types::{StoppointMode, TryFromBytes, VirtualAddress};
 use crate::stoppoint_collection::{StopPoint, StopPointCollection};
 use crate::breakpoint_site::{BreakpointScope, BreakpointSite, BreakpointType};
+use crate::watchpoint::{WatchPoint};
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum ProcessState {
@@ -58,7 +59,8 @@ pub struct Process {
     terminate_on_end: bool,
     is_attached: bool,
     registers: Registers,
-    breakpoint_sites: StopPointCollection<BreakpointSite>
+    breakpoint_sites: StopPointCollection<BreakpointSite>,
+    watchpoints: StopPointCollection<WatchPoint>
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -203,7 +205,15 @@ impl Process {
                 }
 
                 // create handle for child proces and wait if debugging
-                let mut proc = Self { pid, state: ProcessState::stopped(), terminate_on_end: true, is_attached: debug, registers: Registers::new(pid), breakpoint_sites: StopPointCollection::new() };
+                let mut proc = Self {
+                    pid,
+                    state: ProcessState::stopped(),
+                    terminate_on_end: true,
+                    is_attached: debug,
+                    registers: Registers::new(pid),
+                    breakpoint_sites: StopPointCollection::new(),
+                    watchpoints: StopPointCollection::new()
+                };
 
                 if debug {
                     proc.wait_on_signal()?;
@@ -222,7 +232,15 @@ impl Process {
         registers.read_all()?;
         let state = ProcessState::stopped_at(registers.get_pc());
 
-        let mut proc = Self { pid: pid.0, state, terminate_on_end: false, is_attached: true, registers, breakpoint_sites: StopPointCollection::new() };
+        let mut proc = Self {
+            pid: pid.0,
+            state,
+            terminate_on_end: false,
+            is_attached: true,
+            registers,
+            breakpoint_sites: StopPointCollection::new(),
+            watchpoints: StopPointCollection::new()
+        };
         proc.wait_on_signal()?;
 
         Ok(proc)
@@ -390,6 +408,46 @@ impl Process {
         }
 
         bp.set_disabled();
+        Ok(())
+    }
+
+    pub fn create_watchpoint(&mut self, address: VirtualAddress, mode: StoppointMode, size: usize) -> Result<<WatchPoint as StopPoint>::IdType, Error> {
+        if self.watchpoints.contains_address(address) {
+            Err(Error::from_message(format!("Watchpoint already created at address {}", address)))
+        } else {
+            let wp = WatchPoint::new(address, mode, size);
+            let id = wp.id();
+            self.watchpoints.push(wp);
+            Ok(id)
+        }
+    }
+
+    pub fn enable_watchpoint(&mut self, id: <WatchPoint as StopPoint>::IdType) -> Result<(), Error> {
+        let wp = self.watchpoints.get_by_id_mut(id)?;
+
+        if wp.is_enabled() {
+            return Ok(());
+        }
+
+        let register_index = Self::set_hardware_stoppoint(&mut self.registers, wp.address(), wp.mode(), wp.size())?;
+        wp.set_hardware_index(register_index);
+
+        wp.set_enabled();
+        Ok(())
+    }
+
+    pub fn disable_watchpoint(&mut self, id: <WatchPoint as StopPoint>::IdType) -> Result<(), Error> {
+        let wp = self.watchpoints.get_by_id_mut(id)?;
+        if wp.is_disabled() {
+            return Ok(());
+        }
+
+        let register_index = wp.hardware_index().expect("Expected hardware register index for enabled watchpoint");
+        Self::clear_hardware_stoppoint(&mut self.registers, register_index)?;
+
+        wp.clear_hardware_index();
+        wp.set_disabled();
+
         Ok(())
     }
 

@@ -8,5 +8,6 @@ pub mod types;
 pub mod parse;
 pub mod interop;
 pub mod breakpoint_site;
+pub mod watchpoint;
 pub mod stoppoint_collection;
 pub mod disassembler;
