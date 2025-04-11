@@ -479,6 +479,11 @@ impl VirtualAddress {
         Self { addr }
     }
     pub fn addr(&self) -> usize { self.addr }
+
+    pub fn from_le_bytes(bytes: [u8; size_of::<usize>()]) -> Self {
+        let addr = usize::from_le_bytes(bytes);
+        Self::new(addr)
+    }
 }
 
 impl From<usize> for VirtualAddress {
@@ -573,6 +578,36 @@ impl FromStr for VirtualAddress {
 
         let addr = usize::from_str_radix(num_str, 16)?;
         Ok(Self { addr })
+    }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum StoppointMode {
+    Write,
+    ReadWrite,
+    Execute
+}
+
+impl fmt::Display for StoppointMode {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Write => write!(f, "write"),
+            Self::ReadWrite => write!(f, "read_write"),
+            Self::Execute => write!(f, "execute")
+        }
+    }
+}
+
+impl FromStr for StoppointMode {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "write" => Ok(Self::Write),
+            "read_write" => Ok(Self::ReadWrite),
+            "rw" => Ok(Self::ReadWrite),
+            "execute" => Ok(Self::Execute),
+            _ => Err(())
+        }
     }
 }
 

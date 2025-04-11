@@ -310,3 +310,86 @@ impl Registers {
         VirtualAddress::new(addr)
     }
 }
+
+pub type DebugControlRegister = u64;
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct DebugRegisterIndex {
+    index: u8
+}
+
+impl DebugRegisterIndex {
+    fn new_unchecked(index: u8) -> Self { Self { index }}
+    pub fn values() -> impl Iterator<Item=Self> {
+        (0..4).map(|i| Self::new_unchecked(i))
+    }
+
+    pub fn find_free_debug_register(control: DebugControlRegister) -> Option<Self> {
+        for i in Self::values() {
+            if !i.is_enabled(control) {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    pub fn enabled_mask(&self) -> DebugControlRegister {
+        0b11 << (self.index * 2)
+    }
+
+    pub fn is_enabled(&self, control: DebugControlRegister) -> bool {
+        control & self.enabled_mask() > 0
+    }
+
+    pub fn register_id(&self) -> RegisterId {
+        match self.index {
+            0 => RegisterId::dr0,
+            1 => RegisterId::dr1,
+            2 => RegisterId::dr2,
+            3 => RegisterId::dr3,
+            _ => panic!("Invalid debug register index")
+        }
+    }
+
+    pub fn clear_mask(&self) -> DebugControlRegister {
+        // first two bits enable register locally and globally
+        // second four bits encode the mode (r, rw, x) and size
+        let m = (0b11 << (self.index * 2)) | (0b1111 << (self.index * 4 + 16));
+        !m
+    }
+
+    // returns the new debug control register contents with all bits for this
+    // debug register cleared
+    pub fn clear_control(&self, control: DebugControlRegister) -> DebugControlRegister {
+        control & self.clear_mask()
+    }
+
+    pub fn configure_mask(&self, mode: StoppointMode, size: usize) -> DebugControlRegister {
+        let mode_flag = Self::encode_hardware_stoppoint_mode(mode);
+        let size_flag = Self::encode_hardware_stoppoint_size(size);
+
+        let enable_bit: u64 = 1 << (self.index * 2);
+        let mode_bits: u64 = mode_flag << (self.index * 4 + 16);
+        let size_bits: u64 = size_flag << (self.index * 4 + 18);
+
+        enable_bit | mode_bits | size_bits
+    }
+
+    fn encode_hardware_stoppoint_mode(mode: StoppointMode) -> u64 {
+        match mode {
+            StoppointMode::Write => 0b01,
+            StoppointMode::ReadWrite => 0b11,
+            StoppointMode::Execute => 0b00
+        }
+    }
+
+    fn encode_hardware_stoppoint_size(size: usize) -> u64 {
+        match size {
+            1 => 0b00,
+            2 => 0b01,
+            4 => 0b11,
+            8 => 0b10,
+            _ => panic!("Invalid stoppoint size {}", size)
+        }
+    }
+}

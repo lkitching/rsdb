@@ -14,10 +14,11 @@ use crate::interop;
 use crate::interop::{ptrace, ForkResult};
 use crate::pipe::Pipe;
 use crate::process::PIDParseError::OutOfRange;
-use crate::register::{RegisterId, Registers};
-use crate::types::{TryFromBytes, VirtualAddress};
+use crate::register::{RegisterId, Registers, DebugRegisterIndex};
+use crate::types::{StoppointMode, TryFromBytes, VirtualAddress};
 use crate::stoppoint_collection::{StopPoint, StopPointCollection};
-use crate::breakpoint_site::{BreakpointSite};
+use crate::breakpoint_site::{BreakpointScope, BreakpointSite, BreakpointType};
+use crate::watchpoint::{WatchPoint};
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum ProcessState {
@@ -58,7 +59,8 @@ pub struct Process {
     terminate_on_end: bool,
     is_attached: bool,
     registers: Registers,
-    breakpoint_sites: StopPointCollection<BreakpointSite>
+    breakpoint_sites: StopPointCollection<BreakpointSite>,
+    watchpoints: StopPointCollection<WatchPoint>
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -203,7 +205,15 @@ impl Process {
                 }
 
                 // create handle for child proces and wait if debugging
-                let mut proc = Self { pid, state: ProcessState::stopped(), terminate_on_end: true, is_attached: debug, registers: Registers::new(pid), breakpoint_sites: StopPointCollection::new() };
+                let mut proc = Self {
+                    pid,
+                    state: ProcessState::stopped(),
+                    terminate_on_end: true,
+                    is_attached: debug,
+                    registers: Registers::new(pid),
+                    breakpoint_sites: StopPointCollection::new(),
+                    watchpoints: StopPointCollection::new()
+                };
 
                 if debug {
                     proc.wait_on_signal()?;
@@ -222,7 +232,15 @@ impl Process {
         registers.read_all()?;
         let state = ProcessState::stopped_at(registers.get_pc());
 
-        let mut proc = Self { pid: pid.0, state, terminate_on_end: false, is_attached: true, registers, breakpoint_sites: StopPointCollection::new() };
+        let mut proc = Self {
+            pid: pid.0,
+            state,
+            terminate_on_end: false,
+            is_attached: true,
+            registers,
+            breakpoint_sites: StopPointCollection::new(),
+            watchpoints: StopPointCollection::new()
+        };
         proc.wait_on_signal()?;
 
         Ok(proc)
@@ -234,15 +252,15 @@ impl Process {
         let pc = self.get_pc();
         if self.breakpoint_sites.enabled_stoppoint_at_address(pc) {
             let pid = self.pid;
-            let bp = self.breakpoint_sites_mut().get_by_address_mut(pc)?;
+            let bp_id = self.breakpoint_sites().get_by_address(pc)?.id();
 
             // disable breakpoint and step over
-            bp.disable()?;
+            self.disable_breakpoint(bp_id)?;
             ptrace::single_step(pid)?;
             let _wait_status = interop::wait_pid(pid, 0)?;
 
             // re-enable breakpoint
-            bp.enable()?;
+            self.enable_breakpoint(bp_id)?;
         }
 
         ptrace::cont(self.pid)?;
@@ -277,8 +295,8 @@ impl Process {
 
         if at_breakpoint {
             // disable breakpoint at address
-            let bp = self.breakpoint_sites_mut().get_by_address_mut(pc)?;
-            bp.disable()?;
+            let bp_id = self.breakpoint_sites().get_by_address(pc)?.id();
+            self.disable_breakpoint(bp_id)?;
         }
 
         ptrace::single_step(self.pid)?;
@@ -286,8 +304,8 @@ impl Process {
 
         // re-enable breakpoint if required
         if at_breakpoint {
-            let bp = self.breakpoint_sites_mut().get_by_address_mut(pc)?;
-            bp.enable()?;
+            let bp_id = self.breakpoint_sites().get_by_address(pc)?.id();
+            self.enable_breakpoint(bp_id)?;
         }
 
         Ok(reason)
@@ -321,17 +339,188 @@ impl Process {
         self.registers.write_by_id(RegisterId::rip, addr)
     }
 
-    pub fn create_breakpoint_site(&mut self, address: VirtualAddress) -> Result<&mut BreakpointSite, Error> {
+    pub fn create_breakpoint_site(&mut self, address: VirtualAddress, breakpoint_type: BreakpointType, scope: BreakpointScope) -> Result<<BreakpointSite as StopPoint>::IdType, Error> {
         if self.breakpoint_sites.contains_address(address) {
             Err(Error::from_message(format!("Breakpoint site already created at address {}", address)))
         } else {
-            let bp = BreakpointSite::new(self.pid, address);
-            Ok(self.breakpoint_sites.push(bp))
+            let bp = BreakpointSite::new(address, breakpoint_type, scope);
+            let id = bp.id();
+            self.breakpoint_sites.push(bp);
+            Ok(id)
         }
     }
 
+    pub fn enable_breakpoint(&mut self, id: <BreakpointSite as StopPoint>::IdType) -> Result<(), Error> {
+        let bp = self.breakpoint_sites.get_by_id_mut(id)?;
+
+        if bp.is_enabled() {
+            return Ok(());
+        }
+
+        match bp.breakpoint_type() {
+            BreakpointType::Hardware => {
+                let register_index = Self::set_hardware_breakpoint(&mut self.registers, bp.id(), bp.address())?;
+                bp.set_hardware_index(register_index);
+            },
+            BreakpointType::Software => {
+                let data = ptrace::peek_data(self.pid, bp.address()).map_err(|e| e.with_context("Failed to enable breakpoint site"))?;
+
+                // mask off all but low byte and save
+                bp.save((data & 0xFF) as u8);
+
+                // set lower byte of data to 0xCC
+                let data_with_int3 = (data & !0xFF) | 0xCC;
+                ptrace::poke_data(self.pid, bp.address(), data_with_int3)?;
+            }
+        }
+
+        bp.set_enabled();
+        Ok(())
+    }
+
+    pub fn disable_breakpoint(&mut self, id: <BreakpointSite as StopPoint>::IdType) -> Result<(), Error> {
+        let bp = self.breakpoint_sites.get_by_id_mut(id)?;
+
+        if bp.is_disabled() {
+            return Ok(());
+        }
+
+        match bp.breakpoint_type() {
+            BreakpointType::Hardware => {
+                match bp.hardware_index() {
+                    Some(index) => {
+                        Self::clear_hardware_stoppoint(&mut self.registers, index)?;
+                        bp.clear_hardware_index();
+                    },
+                    None => { panic!("Expected enabled hardware breakpoint to have a register index") }
+                }
+            },
+            BreakpointType::Software => {
+                // read word at breakpoint address
+                let data = ptrace::peek_data(self.pid, bp.address())?;
+
+                // clear low byte and restore saved data into it
+                let restored_data = (data & !0xFF) | (bp.saved_data() as usize);
+
+                // write resulting word back into memory
+                ptrace::poke_data(self.pid, bp.address(), restored_data)?;
+            }
+        }
+
+        bp.set_disabled();
+        Ok(())
+    }
+
+    pub fn create_watchpoint(&mut self, address: VirtualAddress, mode: StoppointMode, size: usize) -> Result<<WatchPoint as StopPoint>::IdType, Error> {
+        if self.watchpoints.contains_address(address) {
+            Err(Error::from_message(format!("Watchpoint already created at address {}", address)))
+        } else {
+            let wp = WatchPoint::new(address, mode, size);
+            let id = wp.id();
+            self.watchpoints.push(wp);
+            Ok(id)
+        }
+    }
+
+    pub fn enable_watchpoint(&mut self, id: <WatchPoint as StopPoint>::IdType) -> Result<(), Error> {
+        let wp = self.watchpoints.get_by_id_mut(id)?;
+
+        if wp.is_enabled() {
+            return Ok(());
+        }
+
+        let register_index = Self::set_hardware_stoppoint(&mut self.registers, wp.address(), wp.mode(), wp.size())?;
+        wp.set_hardware_index(register_index);
+
+        wp.set_enabled();
+        Ok(())
+    }
+
+    pub fn disable_watchpoint(&mut self, id: <WatchPoint as StopPoint>::IdType) -> Result<(), Error> {
+        let wp = self.watchpoints.get_by_id_mut(id)?;
+        if wp.is_disabled() {
+            return Ok(());
+        }
+
+        let register_index = wp.hardware_index().expect("Expected hardware register index for enabled watchpoint");
+        Self::clear_hardware_stoppoint(&mut self.registers, register_index)?;
+
+        wp.clear_hardware_index();
+        wp.set_disabled();
+
+        Ok(())
+    }
+
+    pub fn remove_watchpoint_by_id(&mut self, id: <WatchPoint as StopPoint>::IdType) -> Result<(), Error> {
+        // ensure watchpoint exists
+        let wp_id = self.watchpoints.get_by_id(id)?.id();
+        self.disable_watchpoint(wp_id)?;
+        self.watchpoints.remove_by_id(wp_id);
+        Ok(())
+    }
+
+    pub fn remove_breakpoint_by_id(&mut self, id: <BreakpointSite as StopPoint>::IdType) -> Result<(), Error> {
+        let bp = self.breakpoint_sites.get_by_id(id)?;
+        self.disable_breakpoint(bp.id())?;
+        self.breakpoint_sites.remove_by_id(id);
+        Ok(())
+    }
+
+    pub fn remove_breakpoint_by_address(&mut self, address: VirtualAddress) -> Result<(), Error> {
+        let bp_id = self.breakpoint_sites.get_by_address(address)?.id();
+        self.disable_breakpoint(bp_id)?;
+        self.breakpoint_sites.remove_by_id(bp_id);
+        Ok(())
+    }
+
     pub fn breakpoint_sites(&self) -> &StopPointCollection<BreakpointSite> { &self.breakpoint_sites }
-    pub fn breakpoint_sites_mut(&mut self) -> &mut StopPointCollection<BreakpointSite> { &mut self.breakpoint_sites }
+    //pub fn breakpoint_sites_mut(&mut self) -> &mut StopPointCollection<BreakpointSite> { &mut self.breakpoint_sites }
+    pub fn watchpoints(&self) -> &StopPointCollection<WatchPoint> { &self.watchpoints }
+
+    pub fn set_hardware_breakpoint(registers: &mut Registers, _id: <BreakpointSite as StopPoint>::IdType, address: VirtualAddress) -> Result<DebugRegisterIndex, Error> {
+        Self::set_hardware_stoppoint(registers, address, StoppointMode::Execute, 1)
+    }
+
+    fn set_hardware_stoppoint(registers: &mut Registers, address: VirtualAddress, mode: StoppointMode, size: usize) -> Result<DebugRegisterIndex, Error> {
+        let control: u64 = registers.read_by_id_as(RegisterId::dr7);
+
+        let register_index = Self::find_free_stoppoint_register(control)?;
+        let debug_register = register_index.register_id();
+
+        let updated_control = {
+            let reset_control = register_index.clear_control(control);
+            let enable_mask = register_index.configure_mask(mode, size);
+
+            reset_control | enable_mask
+        };
+
+        {
+            // write address into debug register
+            registers.write_by_id(debug_register, address)?;
+
+            // update control register
+            registers.write_by_id(RegisterId::dr7, updated_control)?;
+        }
+
+        Ok(register_index)
+    }
+
+    fn clear_hardware_stoppoint(registers: &mut Registers, register_index: DebugRegisterIndex) -> Result<(), Error> {
+        let register_id = register_index.register_id();
+        registers.write_by_id(register_id, 0u64)?;
+
+        let control: u64 = registers.read_by_id_as(register_id);
+        let updated_control = register_index.clear_control(control);
+
+        registers.write_by_id(register_id, updated_control)
+    }
+
+    fn find_free_stoppoint_register(control_reg: u64) -> Result<DebugRegisterIndex, Error> {
+        match DebugRegisterIndex::find_free_debug_register(control_reg) {
+            Some(index) => Ok(index),
+            None => Err(Error::from_message(String::from("No remaining hardware debug registers")))
+        }
+    }
 
     pub fn read_memory(&self, address: VirtualAddress, num_bytes: usize) -> Result<Vec<u8>, Error> {
         let mut ret = vec![0u8; num_bytes];
@@ -372,7 +561,7 @@ impl Process {
         let address_range = address..(address + num_bytes as isize + 1);
         let sites = self.breakpoint_sites.get_in_region(&address_range);
 
-        for site in sites.filter(|sp| sp.is_enabled()) {
+        for site in sites.filter(|sp| sp.is_enabled() && sp.is_software()) {
             let offset = site.address() - address;
             memory[offset as usize] = site.saved_data()
         }
@@ -731,7 +920,8 @@ mod test {
     fn can_create_breakpoint_site_test() {
         let mut proc = Process::launch("target/debug/run_endlessly", true, StdoutReplacement::None).expect("Failed to launch process");
         let site_address = VirtualAddress::new(42);
-        let site = proc.create_breakpoint_site(site_address).expect("Failed to create breakpoint");
+        let site_id = proc.create_breakpoint_site(site_address, BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint");
+        let site = proc.breakpoint_sites().get_by_id(site_id).expect("Failed to find breakpoint");
 
         assert_eq!(site_address, site.address(), "Unexpected breakpoint address");
     }
@@ -741,27 +931,19 @@ mod test {
         let mut proc = Process::launch("target/debug/run_endlessly", true, StdoutReplacement::None).expect("Failed to launch process");
 
         let (s1_id, s1_addr) = {
-            let s1 = proc.create_breakpoint_site(VirtualAddress::new(42)).expect("Failed to create breakpoint s1");
+            let s1_id = proc.create_breakpoint_site(VirtualAddress::new(42), BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint s1");
+            let s1 = proc.breakpoint_sites().get_by_id(s1_id).expect("Failed to find breakpoint");
             (s1.id(), s1.address())
         };
         assert_eq!(VirtualAddress::new(42), s1_addr);
 
-        let s2_id = {
-            let s2 = proc.create_breakpoint_site(VirtualAddress::new(43)).expect("Failed to create breakpoint s2");
-            s2.id()
-        };
+        let s2_id = proc.create_breakpoint_site(VirtualAddress::new(43), BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint s2");
         assert_eq!(s2_id, s1_id + 1);
 
-        let s3_id = {
-            let s3 = proc.create_breakpoint_site(VirtualAddress::new(44)).expect("Failed to create breakpoint s3");
-            s3.id()
-        };
+        let s3_id = proc.create_breakpoint_site(VirtualAddress::new(44), BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint s3");
         assert_eq!(s3_id, s1_id + 2);
 
-        let s4_id = {
-            let s4 = proc.create_breakpoint_site(VirtualAddress::new(45)).expect("Failed to create breakpoint s4");
-            s4.id()
-        };
+        let s4_id = proc.create_breakpoint_site(VirtualAddress::new(45), BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint s4");
         assert_eq!(s4_id, s1_id + 3);
     }
 
@@ -769,10 +951,10 @@ mod test {
     fn can_find_breakpoint_site_test() {
         let mut proc = Process::launch("target/debug/run_endlessly", true, StdoutReplacement::None).expect("Failed to launch process");
 
-        proc.create_breakpoint_site(VirtualAddress::new(42)).expect("Failed to create breakpoint 1");
-        proc.create_breakpoint_site(VirtualAddress::new(43)).expect("Failed to create breakpoint 2");
-        proc.create_breakpoint_site(VirtualAddress::new(44)).expect("Failed to create breakpoint 3");
-        proc.create_breakpoint_site(VirtualAddress::new(45)).expect("Failed to create breakpoint 4");
+        proc.create_breakpoint_site(VirtualAddress::new(42), BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint 1");
+        proc.create_breakpoint_site(VirtualAddress::new(43), BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint 2");
+        proc.create_breakpoint_site(VirtualAddress::new(44), BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint 3");
+        proc.create_breakpoint_site(VirtualAddress::new(45), BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint 4");
 
         let s1 = proc.breakpoint_sites.get_by_address(VirtualAddress::new(44)).expect("Failed to get breakpoint site 1");
         assert!(proc.breakpoint_sites().contains_address(VirtualAddress::new(44)), "Expected breakpoint to exist");
@@ -803,11 +985,11 @@ mod test {
         assert!(proc.breakpoint_sites().is_empty(), "Expected empty breakpoint list on launch");
         assert_eq!(0, proc.breakpoint_sites().len(), "Expected zero length breakpoint list on launch");
 
-        proc.create_breakpoint_site(VirtualAddress::new(42)).expect("Failed to create first breakpoint site");
+        proc.create_breakpoint_site(VirtualAddress::new(42), BreakpointType::Software, BreakpointScope::Internal).expect("Failed to create first breakpoint site");
         assert_eq!(false, proc.breakpoint_sites().is_empty(), "Expected non-empty breakpoint list after create");
         assert_eq!(1, proc.breakpoint_sites().len(), "Expected singleton breakpoint list after create");
 
-        proc.create_breakpoint_site(VirtualAddress::new(43)).expect("Failed to create second breakpoint site");
+        proc.create_breakpoint_site(VirtualAddress::new(43), BreakpointType::Software, BreakpointScope::Internal).expect("Failed to create second breakpoint site");
         assert_eq!(false, proc.breakpoint_sites.is_empty(), "Expected non-empty breakpoint list after second breakpoint created");
         assert_eq!(2, proc.breakpoint_sites().len(), "Expected breakpoint list of length 2 after second breakpoint created");
     }
@@ -817,10 +999,10 @@ mod test {
         let mut proc = Process::launch("target/debug/run_endlessly", true, StdoutReplacement::None).expect("Failed to launch process");
 
         {
-            proc.create_breakpoint_site(VirtualAddress::new(42)).expect("Failed to create breakpoint site 1");
-            proc.create_breakpoint_site(VirtualAddress::new(43)).expect("Failed to create breakpoint site 2");
-            proc.create_breakpoint_site(VirtualAddress::new(44)).expect("Failed to create breakpoint site 3");
-            proc.create_breakpoint_site(VirtualAddress::new(45)).expect("Failed to create breakpoint site 4");
+            proc.create_breakpoint_site(VirtualAddress::new(42), BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint site 1");
+            proc.create_breakpoint_site(VirtualAddress::new(43), BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint site 2");
+            proc.create_breakpoint_site(VirtualAddress::new(44), BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint site 3");
+            proc.create_breakpoint_site(VirtualAddress::new(45), BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint site 4");
         }
 
         {
@@ -844,8 +1026,8 @@ mod test {
         let offset = get_entry_point_offset(Path::new(exec_path));
         let load_address = get_load_address(proc.pid(), offset);
 
-        let bp = proc.create_breakpoint_site(load_address).expect("Failed to create breakpoint");
-        bp.enable().expect("Failed to enable breakpoint");
+        let bp = proc.create_breakpoint_site(load_address, BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint");
+        proc.enable_breakpoint(bp).expect("Failed to enable breakpoint");
         proc.resume().expect("Failed to resume");
         let reason = proc.wait_on_signal().expect("Failed to wait");
 
@@ -871,13 +1053,12 @@ mod test {
     fn can_remove_breakpoint_sites() {
         let mut proc = Process::launch("target/debug/hello_rsdb", true, StdoutReplacement::None).expect("Failed to launch process");
 
-        let bp1 = proc.create_breakpoint_site(VirtualAddress::new(42)).expect("Failed to create breakpoint site 1");
-        let bp1_id = bp1.id();
-        proc.create_breakpoint_site(VirtualAddress::new(43)).expect("Failed to create breakpoint site 2");
+        let bp1_id = proc.create_breakpoint_site(VirtualAddress::new(42), BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint site 1");
+        proc.create_breakpoint_site(VirtualAddress::new(43), BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint site 2");
         assert_eq!(2, proc.breakpoint_sites().len(), "Unexpected number of breakpoints after create");
 
-        proc.breakpoint_sites_mut().remove_by_id(bp1_id);
-        proc.breakpoint_sites_mut().remove_by_address(VirtualAddress::new(43));
+        proc.remove_breakpoint_by_id(bp1_id).expect("Failed to remove breakpoint by id");
+        proc.remove_breakpoint_by_address(VirtualAddress::new(43)).expect("Failed to remove breakpoint by address");
         assert!(proc.breakpoint_sites().is_empty(), "Expected breakpoints to be removed");
     }
 
@@ -924,6 +1105,111 @@ mod test {
         channel.read_to_string(&mut written)?;
 
         assert_eq!(message, written, "Unexpected message after memory write");
+
+        Ok(())
+    }
+
+    #[test]
+    fn hardware_breakpoint_evades_memory_checksums() -> Result<(), Error> {
+        let close_on_exec = false;
+        let mut channel = Pipe::create(close_on_exec)?;
+        let mut proc = Process::launch("target/debug/anti_debugger", true, StdoutReplacement::Fd(channel.write_fd()))?;
+        channel.close_write();
+
+        proc.resume()?;
+        proc.wait_on_signal()?;
+
+        let func = {
+            let mut bytes = [0u8; size_of::<usize>()];
+            channel.read(bytes.as_mut_slice())?;
+            VirtualAddress::from_le_bytes(bytes)
+        };
+
+        let soft = proc.create_breakpoint_site(func, BreakpointType::Software, BreakpointScope::External)?;
+        proc.enable_breakpoint(soft)?;
+
+        proc.resume()?;
+        proc.wait_on_signal()?;
+
+        {
+            let mut buf = [0u8; 100];
+            let bytes_read = channel.read(buf.as_mut_slice())?;
+            let s = String::from_utf8_lossy(&buf[0..bytes_read]).to_string();
+
+            assert_eq!("Putting pepperoni on pizza", s.trim(), "Unexpected message after software breakpoint");
+        }
+
+        // delete software breakpoint and replace with hardware breakpoint
+        proc.remove_breakpoint_by_id(soft)?;
+        assert!(proc.breakpoint_sites.is_empty(), "Expected breakpoint to be deleted");
+
+        let hard = proc.create_breakpoint_site(func, BreakpointType::Hardware, BreakpointScope::External)?;
+        proc.enable_breakpoint(hard)?;
+
+        proc.resume()?;
+        proc.wait_on_signal()?;
+
+        // should break on hardware breakpoint
+        let pc = proc.get_pc();
+        assert_eq!(func, pc, "Expected to break on hardware breakpoint");
+
+        proc.resume()?;
+        proc.wait_on_signal()?;
+
+        {
+            let mut buf = [0u8; 100];
+            let bytes_read = channel.read(buf.as_mut_slice())?;
+            let s = String::from_utf8_lossy(&buf[0..bytes_read]).to_string();
+
+            assert_eq!("Putting pineapple on pizza", s.trim(), "Unexpected message after hardware breakpoint");
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn watchpoint_detects_reads() -> Result<(), Error> {
+        let close_on_exec = false;
+        let mut channel = Pipe::create(close_on_exec)?;
+        let mut proc = Process::launch("target/debug/anti_debugger", true, StdoutReplacement::Fd(channel.write_fd()))?;
+        channel.close_write();
+
+        proc.resume()?;
+        proc.wait_on_signal()?;
+
+        let func = {
+            let mut bytes = [0u8; size_of::<usize>()];
+            channel.read(bytes.as_mut_slice())?;
+            VirtualAddress::from_le_bytes(bytes)
+        };
+
+        // create watchpoint on function address
+        let watch = proc.create_watchpoint(func, StoppointMode::ReadWrite, 1)?;
+        proc.enable_watchpoint(watch)?;
+
+        proc.resume()?;
+        proc.wait_on_signal()?;
+
+        // step and create software breakpoint
+        proc.step_instruction()?;
+        let soft = proc.create_breakpoint_site(func, BreakpointType::Software, BreakpointScope::External)?;
+        proc.enable_breakpoint(soft)?;
+
+        proc.resume()?;
+        let reason = proc.wait_on_signal()?;
+
+        assert_eq!(reason.info, SIGTRAP, "Expected stop due to trap");
+
+        proc.resume()?;
+        proc.wait_on_signal()?;
+
+        {
+            let mut buf = [0u8; 100];
+            let bytes_read = channel.read(buf.as_mut_slice())?;
+            let s = String::from_utf8_lossy(&buf[0..bytes_read]).to_string();
+
+            assert_eq!("Putting pineapple on pizza", s.trim(), "Unexpected message after hardware breakpoint");
+        }
 
         Ok(())
     }

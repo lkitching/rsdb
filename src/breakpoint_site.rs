@@ -1,12 +1,9 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::ops::Range;
 
-use libc::{pid_t};
-
 use crate::types::VirtualAddress;
 use crate::stoppoint_collection::{StopPoint};
-use crate::error::Error;
-use crate::interop::ptrace;
+use crate::register::DebugRegisterIndex;
 
 static ID_COUNTER: AtomicU32 = AtomicU32::new(1);
 
@@ -15,63 +12,50 @@ fn get_next_id() -> u32 {
     id
 }
 
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum BreakpointType { Hardware, Software }
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum BreakpointScope { Internal, External }
+
 pub struct BreakpointSite {
     id: u32,
-    pid: pid_t,
     address: VirtualAddress,
     is_enabled: bool,
-    saved_data: u8
+    saved_data: u8,
+    _type: BreakpointType,
+    scope: BreakpointScope,
+    hardware_register_index: Option<DebugRegisterIndex>
 }
 
 impl BreakpointSite {
-    pub fn new(pid: pid_t, address: VirtualAddress) -> Self {
+    pub fn new(address: VirtualAddress, breakpoint_type: BreakpointType, scope: BreakpointScope) -> Self {
         let id = get_next_id();
-        Self { id, pid, address, is_enabled: false, saved_data: 0 }
+        Self { id, address, is_enabled: false, saved_data: 0, scope, _type: breakpoint_type, hardware_register_index: None }
     }
 
     pub fn address(&self) -> VirtualAddress {
         self.address
     }
+    pub fn breakpoint_type(&self) -> BreakpointType { self._type }
+    pub fn scope(&self) -> BreakpointScope { self.scope }
 
-    pub fn enable(&mut self) -> Result<(), Error> {
-        if self.is_enabled {
-            return Ok(());
-        }
+    pub fn set_enabled(&mut self) { self.is_enabled = true; }
+    pub fn set_disabled(&mut self) { self.is_enabled = false; }
+    pub fn save(&mut self, data: u8) { self.saved_data = data; }
 
-        let data = ptrace::peek_data(self.pid, self.address).map_err(|e| e.with_context("Failed to enable breakpoint site"))?;
-
-        // mask off all but low byte and save
-        self.saved_data = (data & 0xFF) as u8;
-
-        // set lower byte of data to 0xCC
-        let data_with_int3 = (data & !0xFF) | 0xCC;
-        ptrace::poke_data(self.pid, self.address, data_with_int3)?;
-
-        self.is_enabled = true;
-        Ok(())
-    }
-
-    pub fn disable(&mut self) -> Result<(), Error> {
-        if self.is_disabled() {
-            return Ok(());
-        }
-
-        // read word at breakpoint address
-        let data = ptrace::peek_data(self.pid, self.address)?;
-
-        // clear low byte and restore saved data into it
-        let restored_data = (data & !0xFF) | (self.saved_data as usize);
-
-        // write resulting word back into memory
-        ptrace::poke_data(self.pid, self.address, restored_data)?;
-
-        self.is_enabled = false;
-        Ok(())
-    }
+    pub fn set_hardware_index(&mut self, hardware_index: DebugRegisterIndex) { self.hardware_register_index = Some(hardware_index); }
+    pub fn hardware_index(&self) -> Option<DebugRegisterIndex> { self.hardware_register_index }
+    pub fn clear_hardware_index(&mut self) { self.hardware_register_index = None; }
 
     pub fn saved_data(&self) -> u8 {
         self.saved_data
     }
+    pub fn is_internal(&self) -> bool { self.scope == BreakpointScope::Internal }
+    pub fn is_external(&self) -> bool { self.scope == BreakpointScope::External }
+
+    pub fn is_hardware(&self) -> bool { self._type == BreakpointType::Hardware }
+    pub fn is_software(&self) -> bool { self._type == BreakpointType::Software }
 }
 
 impl StopPoint for BreakpointSite {
