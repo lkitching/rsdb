@@ -1166,4 +1166,51 @@ mod test {
 
         Ok(())
     }
+
+    #[test]
+    fn watchpoint_detects_reads() -> Result<(), Error> {
+        let close_on_exec = false;
+        let mut channel = Pipe::create(close_on_exec)?;
+        let mut proc = Process::launch("target/debug/anti_debugger", true, StdoutReplacement::Fd(channel.write_fd()))?;
+        channel.close_write();
+
+        proc.resume()?;
+        proc.wait_on_signal()?;
+
+        let func = {
+            let mut bytes = [0u8; size_of::<usize>()];
+            channel.read(bytes.as_mut_slice())?;
+            VirtualAddress::from_le_bytes(bytes)
+        };
+
+        // create watchpoint on function address
+        let watch = proc.create_watchpoint(func, StoppointMode::ReadWrite, 1)?;
+        proc.enable_watchpoint(watch)?;
+
+        proc.resume()?;
+        proc.wait_on_signal()?;
+
+        // step and create software breakpoint
+        proc.step_instruction()?;
+        let soft = proc.create_breakpoint_site(func, BreakpointType::Software, BreakpointScope::External)?;
+        proc.enable_breakpoint(soft)?;
+
+        proc.resume()?;
+        let reason = proc.wait_on_signal()?;
+
+        assert_eq!(reason.info, SIGTRAP, "Expected stop due to trap");
+
+        proc.resume()?;
+        proc.wait_on_signal()?;
+
+        {
+            let mut buf = [0u8; 100];
+            let bytes_read = channel.read(buf.as_mut_slice())?;
+            let s = String::from_utf8_lossy(&buf[0..bytes_read]).to_string();
+
+            assert_eq!("Putting pineapple on pizza", s.trim(), "Unexpected message after hardware breakpoint");
+        }
+
+        Ok(())
+    }
 }
