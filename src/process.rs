@@ -64,9 +64,31 @@ pub struct Process {
 }
 
 #[derive(Copy, Clone, Debug)]
+pub enum TrapType {
+    SingleStep,
+    SoftwareBreak,
+    HardwareBreak,
+    Unknown
+}
+
+impl TrapType {
+    fn from_code(code: c_int) -> Self {
+        use libc::{TRAP_TRACE, SI_KERNEL, TRAP_HWBKPT};
+        match code {
+            TRAP_TRACE => Self::SingleStep,
+            // NOTE: linux uses SI_KERNEL for software breakpoints on x64!
+            SI_KERNEL => Self::SoftwareBreak,
+            TRAP_HWBKPT => Self::HardwareBreak,
+            _ => Self::Unknown
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
 pub struct StopReason {
     pub reason: ProcessState,
-    pub info: c_int
+    pub info: c_int,
+    trap_reason: Option<TrapType>
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -96,17 +118,20 @@ impl StopReason {
         if WIFEXITED(wait_status) {
             Self {
                 reason: ProcessState::Exited,
-                info: WEXITSTATUS(wait_status)
+                info: WEXITSTATUS(wait_status),
+                trap_reason: None
             }
         } else if WIFSIGNALED(wait_status) {
             Self {
                 reason: ProcessState::Terminated,
-                info: WTERMSIG(wait_status)
+                info: WTERMSIG(wait_status),
+                trap_reason: None
             }
         } else if WIFSTOPPED(wait_status) {
             Self {
                 reason: ProcessState::stopped(),
-                info: WSTOPSIG(wait_status)
+                info: WSTOPSIG(wait_status),
+                trap_reason: None
             }
         } else {
             panic!("Unknown status for process");
@@ -165,7 +190,7 @@ impl Process {
                 if let Err(e) = setpgid(0, 0) {
                     exit_with_perror(&mut pipe, e);
                 }
-                
+
                 // turn off ASLR for this process
                 interop::personality(ADDR_NO_RANDOMIZE)?;
                 //close read side of pipe
@@ -280,6 +305,8 @@ impl Process {
         if self.is_attached && stop_reason.reason.is_stopped() {
             // read all registers and get program counter for stop state
             self.read_all_registers()?;
+            self.augment_stop_reason(&mut stop_reason)?;
+
             let pc = self.get_pc();
             stop_reason.reason.set_pc(pc);
 
@@ -292,6 +319,16 @@ impl Process {
 
         self.state = stop_reason.reason;
         Ok(stop_reason)
+    }
+
+    fn augment_stop_reason(&self, reason: &mut StopReason) -> Result<(), Error> {
+        let info = ptrace::get_sig_info(self.pid)?;
+        if reason.info == SIGTRAP {
+            let trap_reason = TrapType::from_code(info.si_code);
+            reason.trap_reason = Some(trap_reason);
+        }
+
+        Ok(())
     }
 
     pub fn step_instruction(&mut self) -> Result<StopReason, Error> {

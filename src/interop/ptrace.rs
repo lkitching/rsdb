@@ -1,6 +1,6 @@
 use std::{mem, ptr};
-
-use libc::{c_void, pid_t, user_fpregs_struct, user_regs_struct, size_t, PTRACE_SINGLESTEP};
+use std::mem::MaybeUninit;
+use libc::{c_void, pid_t, user_fpregs_struct, user_regs_struct, size_t, PTRACE_SINGLESTEP, siginfo_t, PTRACE_GETSIGINFO};
 use libc::{ptrace, PTRACE_TRACEME, PTRACE_ATTACH, PTRACE_CONT, PTRACE_DETACH, PTRACE_GETREGS, PTRACE_GETFPREGS, PTRACE_PEEKUSER, PTRACE_POKEUSER, PTRACE_SETREGS, PTRACE_SETFPREGS};
 use libc::{PTRACE_PEEKDATA, PTRACE_POKEDATA};
 use crate::error::*;
@@ -115,5 +115,15 @@ pub fn single_step(pid: pid_t) -> Result<(), Error> {
         Err(Error::from_errno("Failed to single step"))
     } else {
         Ok(())
+    }
+}
+
+pub fn get_sig_info(pid: pid_t) -> Result<siginfo_t, Error> {
+    let mut info = MaybeUninit::<siginfo_t>::uninit();
+    if unsafe { ptrace(PTRACE_GETSIGINFO, pid, ptr::null::<c_void>(), info.as_mut_ptr() as *mut c_void) } < 0 {
+        Err(Error::from_errno("Failed to get signal info"))
+    } else {
+        let info = unsafe { info.assume_init() };
+        Ok(info)
     }
 }
