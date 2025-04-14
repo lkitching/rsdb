@@ -11,7 +11,7 @@ use libc::{c_int, waitpid, kill, SIGSTOP, SIGCONT, WEXITSTATUS, WTERMSIG, WIFSTO
 
 use crate::error::{Error};
 use crate::interop;
-use crate::interop::{ptrace, ForkResult};
+use crate::interop::{ptrace, setpgid, ForkResult};
 use crate::pipe::Pipe;
 use crate::process::PIDParseError::OutOfRange;
 use crate::register::{RegisterId, Registers, DebugRegisterIndex};
@@ -161,6 +161,11 @@ impl Process {
 
         match interop::fork()? {
             ForkResult::InChild => {
+                // move inferior process into its own process group
+                if let Err(e) = setpgid(0, 0) {
+                    exit_with_perror(&mut pipe, e);
+                }
+                
                 // turn off ASLR for this process
                 interop::personality(ADDR_NO_RANDOMIZE)?;
                 //close read side of pipe

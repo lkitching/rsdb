@@ -94,6 +94,8 @@ impl Debugger {
         }
     }
 
+    pub fn process(&self) -> &Process { &self.proc }
+
     pub fn process_mut(&mut self) -> &mut Process { &mut self.proc }
 
     fn handle_command_parse_error(&self, e: CommandParseError) {
