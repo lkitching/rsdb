@@ -1063,11 +1063,7 @@ mod test {
         assert_eq!(reason.reason, ProcessState::Exited, "Unexpected wait reason after resume");
         assert_eq!(reason.info, 0, "Unexpected wait info after resume");
 
-        let data = {
-            let mut s = String::new();
-            channel.read_to_string(&mut s).expect("Failed to read from pipe");
-            s
-        };
+        let data = read_next_string(&mut channel);
         assert_eq!("Hello, rsdb!\n", data, "Unexpected output");
 
         Ok(())
@@ -1158,10 +1154,7 @@ mod test {
         proc.wait_on_signal()?;
 
         {
-            let mut buf = [0u8; 100];
-            let bytes_read = channel.read(buf.as_mut_slice())?;
-            let s = String::from_utf8_lossy(&buf[0..bytes_read]).to_string();
-
+            let s = read_next_string(&mut channel);
             assert_eq!("Putting pepperoni on pizza", s.trim(), "Unexpected message after software breakpoint");
         }
 
@@ -1183,10 +1176,7 @@ mod test {
         proc.wait_on_signal()?;
 
         {
-            let mut buf = [0u8; 100];
-            let bytes_read = channel.read(buf.as_mut_slice())?;
-            let s = String::from_utf8_lossy(&buf[0..bytes_read]).to_string();
-
+            let s = read_next_string(&mut channel);
             assert_eq!("Putting pineapple on pizza", s.trim(), "Unexpected message after hardware breakpoint");
         }
 
@@ -1230,10 +1220,7 @@ mod test {
         proc.wait_on_signal()?;
 
         {
-            let mut buf = [0u8; 100];
-            let bytes_read = channel.read(buf.as_mut_slice())?;
-            let s = String::from_utf8_lossy(&buf[0..bytes_read]).to_string();
-
+            let s = read_next_string(&mut channel);
             assert_eq!("Putting pineapple on pizza", s.trim(), "Unexpected message after hardware breakpoint");
         }
 
