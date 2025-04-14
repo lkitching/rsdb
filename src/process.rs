@@ -725,7 +725,7 @@ mod test {
         let re = Regex::new(r"(\w+)-\w+ ..(.). (\w+)").expect("Invalid map line regex");
         let maps_file: PathBuf = ["/proc", pid.to_string().as_str(), "maps"].iter().collect();
         let f = File::open(maps_file).expect("Failed to open maps file");
-        let mut reader = BufReader::new(f);
+        let reader = BufReader::new(f);
 
         for line_result in reader.lines() {
             if let Ok(line) = line_result {
@@ -863,7 +863,7 @@ mod test {
         proc.wait_on_signal()?;
 
         {
-            let output = read_next_string(&mut channel);
+            let _output = read_next_string(&mut channel);
 
             // TODO: fix!
             // assert_eq!("1234.56", output);
@@ -919,7 +919,7 @@ mod test {
         proc.wait_on_signal()?;
 
         {
-            let v: Byte128 = proc.registers_mut().read_by_id_as(RegisterId::st0);
+            let _v: Byte128 = proc.registers_mut().read_by_id_as(RegisterId::st0);
 
             // TODO: figure out how to get the expected bytes for an 80-bit float
             //assert_eq!(expected_bytes, v, "Unexpected value for st0");
@@ -988,7 +988,7 @@ mod test {
 
     #[test]
     fn cannot_find_breakpoint_site_test() -> Result<(), Error> {
-        let mut proc = Process::launch("target/debug/run_endlessly", true, StdoutReplacement::None)?;
+        let proc = Process::launch("target/debug/run_endlessly", true, StdoutReplacement::None)?;
 
         assert!(proc.breakpoint_sites().get_by_address(VirtualAddress::new(44)).is_err(), "Unexpected breakpoint at address");
         assert!(proc.breakpoint_sites().get_by_id(44).is_err(), "Unexpected breakpoint with id");
