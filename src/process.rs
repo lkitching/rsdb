@@ -745,9 +745,10 @@ mod test {
     }
 
     #[test]
-    fn process_launch_succeeds() {
-        let r = Process::launch("yes", true, StdoutReplacement::None).expect("Failed to start process");
+    fn process_launch_succeeds() -> Result<(), Error> {
+        let r = Process::launch("yes", true, StdoutReplacement::None)?;
         assert!(process_exists(r.pid()), "Process does not exist");
+        Ok(())
     }
 
     #[test]
@@ -757,40 +758,47 @@ mod test {
     }
 
     #[test]
-    fn process_attach_success() {
-        let target = Process::launch("target/debug/run_endlessly", false, StdoutReplacement::None).expect("Failed to launch process");
-        let _proc = Process::attach(PID(target.pid())).expect("Failed to attach to process");
-        let status = get_process_status(target.pid()).expect("Failed to read process status");
+    fn process_attach_success() -> Result<(), Error> {
+        let target = Process::launch("target/debug/run_endlessly", false, StdoutReplacement::None)?;
+        let _proc = Process::attach(PID(target.pid()))?;
+        let status = get_process_status(target.pid())?;
+
         assert_eq!('t', status, "Unexpected process status");
+
+        Ok(())
     }
 
     #[test]
-    fn process_resume_launched_success() {
-        let mut proc = Process::launch("target/debug/run_endlessly", true, StdoutReplacement::None).expect("Failed to launch process");
-        proc.resume().expect("Failed to resume");
+    fn process_resume_launched_success() -> Result<(), Error> {
+        let mut proc = Process::launch("target/debug/run_endlessly", true, StdoutReplacement::None)?;
+        proc.resume()?;
 
-        let status = get_process_status(proc.pid()).expect("Failed to get process status");
+        let status = get_process_status(proc.pid())?;
         assert!(status == 'R' || status == 'S', "Unexpected process status after resume");
+
+        Ok(())
     }
 
     #[test]
-    fn process_resume_attached_success() {
-        let target = Process::launch("target/debug/run_endlessly", false, StdoutReplacement::None).expect("Failed to launch process");
+    fn process_resume_attached_success() -> Result<(), Error> {
+        let target = Process::launch("target/debug/run_endlessly", false, StdoutReplacement::None)?;
 
-        let mut proc = Process::attach(PID(target.pid())).expect("Failed to attach to process");
-        proc.resume().expect("Failed to resume");
+        let mut proc = Process::attach(PID(target.pid()))?;
+        proc.resume()?;
 
-        let status = get_process_status(proc.pid()).expect("Failed to get process status");
+        let status = get_process_status(proc.pid())?;
         assert!(status == 'R' || status == 'S');
+        Ok(())
     }
 
     #[test]
-    fn process_resume_already_terminated() {
-        let mut proc = Process::launch("target/debug/end_immediately", true, StdoutReplacement::None).expect("Failed to launch process");
-        proc.resume().expect("Failed to resume");
-        let _reason = proc.wait_on_signal().expect("Failed to wait");
+    fn process_resume_already_terminated() -> Result<(), Error> {
+        let mut proc = Process::launch("target/debug/end_immediately", true, StdoutReplacement::None)?;
+        proc.resume()?;
+        let _reason = proc.wait_on_signal()?;
         let result = proc.resume();
         assert!(result.is_err(), "Expected error waiting on terminated process");
+        Ok(())
     }
 
     fn read_next_string(channel: &mut Pipe) -> String {
@@ -801,20 +809,20 @@ mod test {
 
     // TODO: move to new tests directory?
     #[test]
-    fn write_registers() {
+    fn write_registers() -> Result<(), Error> {
         let close_on_exec = false;
-        let mut channel = Pipe::create(close_on_exec).expect("Failed to create pipe");
+        let mut channel = Pipe::create(close_on_exec)?;
 
-        let mut proc = Process::launch("target/debug/reg_write", true, StdoutReplacement::Fd(channel.write_fd())).expect("Failed to launch process");
+        let mut proc = Process::launch("target/debug/reg_write", true, StdoutReplacement::Fd(channel.write_fd()))?;
         channel.close_write();
 
-        proc.resume().expect("Failed to resume");
-        proc.wait_on_signal().expect("Failed to wait");
+        proc.resume()?;
+        proc.wait_on_signal()?;
 
-        proc.registers_mut().write_by_id(RegisterId::rsi, 0xcafecafeu32).expect("Failed to write register");
+        proc.registers_mut().write_by_id(RegisterId::rsi, 0xcafecafeu32)?;
 
-        proc.resume().expect("Failed to resume");
-        proc.wait_on_signal().expect("Failed to wait");
+        proc.resume()?;
+        proc.wait_on_signal()?;
 
         {
             let output = read_next_string(&mut channel);
@@ -822,10 +830,10 @@ mod test {
         };
 
         // write to mm0 register
-        proc.registers_mut().write_by_id(RegisterId::mm0, 0xba5eba11u32).expect("Failed to write register");
+        proc.registers_mut().write_by_id(RegisterId::mm0, 0xba5eba11u32)?;
 
-        proc.resume().expect("Failed to resume");
-        proc.wait_on_signal().expect("Failed to wait");
+        proc.resume()?;
+        proc.wait_on_signal()?;
 
         {
             let output = read_next_string(&mut channel);
@@ -833,10 +841,10 @@ mod test {
         }
 
         // write to sse register
-        proc.registers_mut().write_by_id(RegisterId::xmm0, 42.24f64).expect("Failed to write register");
+        proc.registers_mut().write_by_id(RegisterId::xmm0, 42.24f64)?;
 
-        proc.resume().expect("Failed to resume");
-        proc.wait_on_signal().expect("Failed to wait");
+        proc.resume()?;
+        proc.wait_on_signal()?;
 
         {
             let output = read_next_string(&mut channel);
@@ -846,13 +854,13 @@ mod test {
         // x87
         {
             let regs = proc.registers_mut();
-            regs.write_by_id(RegisterId::fsw, 0b0011100000000000u16).expect("Failed to write fws register");
-            regs.write_by_id(RegisterId::st0, 1234.56f128).expect("Failed to write st0");
-            regs.write_by_id(RegisterId::ftw, 0b0011111111111111u16).expect("Failed to write ftw register");
+            regs.write_by_id(RegisterId::fsw, 0b0011100000000000u16)?;
+            regs.write_by_id(RegisterId::st0, 1234.56f128)?;
+            regs.write_by_id(RegisterId::ftw, 0b0011111111111111u16)?;
         }
 
-        proc.resume().expect("Failed to wait");
-        proc.wait_on_signal().expect("Failed to wait");
+        proc.resume()?;
+        proc.wait_on_signal()?;
 
         {
             let output = read_next_string(&mut channel);
@@ -860,14 +868,16 @@ mod test {
             // TODO: fix!
             // assert_eq!("1234.56", output);
         }
+
+        Ok(())
     }
 
     #[test]
-    fn read_registers() {
-        let mut proc = Process::launch("target/debug/reg_read", true, StdoutReplacement::None).expect("Failed to launch process");
+    fn read_registers() -> Result<(), Error> {
+        let mut proc = Process::launch("target/debug/reg_read", true, StdoutReplacement::None)?;
 
-        proc.resume().expect("Failed to resume");
-        let reason = proc.wait_on_signal().expect("Failed to wait");
+        proc.resume()?;
+        let reason = proc.wait_on_signal()?;
         assert!(reason.reason.is_stopped());
 
         {
@@ -876,8 +886,8 @@ mod test {
             assert_eq!(0xcafecafeu64, v, "Unexpected value for R13");
         }
 
-        proc.resume().expect("Failed to resume");
-        proc.wait_on_signal().expect("Failed to wait");
+        proc.resume()?;
+        proc.wait_on_signal()?;
 
         {
             // read r13b
@@ -885,16 +895,16 @@ mod test {
             assert_eq!(42, v, "Unexpected value for R13b");
         }
 
-        proc.resume().expect("Failed to resume");
-        proc.wait_on_signal().expect("Failed to wait");
+        proc.resume()?;
+        proc.wait_on_signal()?;
         {
             let v: Byte64 = proc.registers_mut().read_by_id_as(RegisterId::mm0);
             let expected = Byte64::from_le_bytes([0x11, 0xba, 0x5e, 0xba, 0, 0, 0, 0]);
             assert_eq!(expected, v, "Unexpected value for MM0");
         }
 
-        proc.resume().expect("Failed to resume");
-        proc.wait_on_signal().expect("Failed to wait");
+        proc.resume()?;
+        proc.wait_on_signal()?;
 
         {
             let v: Byte128 = proc.registers_mut().read_by_id_as(RegisterId::xmm0);
@@ -905,8 +915,8 @@ mod test {
             assert_eq!(v, expected_bytes, "Unexpected value loaded from XMM0 register");
         }
 
-        proc.resume().expect("Failed to resume");
-        proc.wait_on_signal().expect("Failed to wait");
+        proc.resume()?;
+        proc.wait_on_signal()?;
 
         {
             let v: Byte128 = proc.registers_mut().read_by_id_as(RegisterId::st0);
@@ -914,95 +924,105 @@ mod test {
             // TODO: figure out how to get the expected bytes for an 80-bit float
             //assert_eq!(expected_bytes, v, "Unexpected value for st0");
         }
+
+        Ok(())
     }
 
     #[test]
-    fn can_create_breakpoint_site_test() {
-        let mut proc = Process::launch("target/debug/run_endlessly", true, StdoutReplacement::None).expect("Failed to launch process");
+    fn can_create_breakpoint_site_test() -> Result<(), Error> {
+        let mut proc = Process::launch("target/debug/run_endlessly", true, StdoutReplacement::None)?;
         let site_address = VirtualAddress::new(42);
-        let site_id = proc.create_breakpoint_site(site_address, BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint");
-        let site = proc.breakpoint_sites().get_by_id(site_id).expect("Failed to find breakpoint");
+        let site_id = proc.create_breakpoint_site(site_address, BreakpointType::Software, BreakpointScope::External)?;
+        let site = proc.breakpoint_sites().get_by_id(site_id)?;
 
         assert_eq!(site_address, site.address(), "Unexpected breakpoint address");
+        Ok(())
     }
 
     #[test]
-    fn breakpoint_site_ids_increase() {
-        let mut proc = Process::launch("target/debug/run_endlessly", true, StdoutReplacement::None).expect("Failed to launch process");
+    fn breakpoint_site_ids_increase() -> Result<(), Error> {
+        let mut proc = Process::launch("target/debug/run_endlessly", true, StdoutReplacement::None)?;
 
         let (s1_id, s1_addr) = {
-            let s1_id = proc.create_breakpoint_site(VirtualAddress::new(42), BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint s1");
-            let s1 = proc.breakpoint_sites().get_by_id(s1_id).expect("Failed to find breakpoint");
+            let s1_id = proc.create_breakpoint_site(VirtualAddress::new(42), BreakpointType::Software, BreakpointScope::External)?;
+            let s1 = proc.breakpoint_sites().get_by_id(s1_id)?;
             (s1.id(), s1.address())
         };
         assert_eq!(VirtualAddress::new(42), s1_addr);
 
-        let s2_id = proc.create_breakpoint_site(VirtualAddress::new(43), BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint s2");
+        let s2_id = proc.create_breakpoint_site(VirtualAddress::new(43), BreakpointType::Software, BreakpointScope::External)?;
         assert_eq!(s2_id, s1_id + 1);
 
-        let s3_id = proc.create_breakpoint_site(VirtualAddress::new(44), BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint s3");
+        let s3_id = proc.create_breakpoint_site(VirtualAddress::new(44), BreakpointType::Software, BreakpointScope::External)?;
         assert_eq!(s3_id, s1_id + 2);
 
-        let s4_id = proc.create_breakpoint_site(VirtualAddress::new(45), BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint s4");
+        let s4_id = proc.create_breakpoint_site(VirtualAddress::new(45), BreakpointType::Software, BreakpointScope::External)?;
         assert_eq!(s4_id, s1_id + 3);
+
+        Ok(())
     }
 
     #[test]
-    fn can_find_breakpoint_site_test() {
-        let mut proc = Process::launch("target/debug/run_endlessly", true, StdoutReplacement::None).expect("Failed to launch process");
+    fn can_find_breakpoint_site_test() -> Result<(), Error> {
+        let mut proc = Process::launch("target/debug/run_endlessly", true, StdoutReplacement::None)?;
 
-        proc.create_breakpoint_site(VirtualAddress::new(42), BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint 1");
-        proc.create_breakpoint_site(VirtualAddress::new(43), BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint 2");
-        proc.create_breakpoint_site(VirtualAddress::new(44), BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint 3");
-        proc.create_breakpoint_site(VirtualAddress::new(45), BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint 4");
+        proc.create_breakpoint_site(VirtualAddress::new(42), BreakpointType::Software, BreakpointScope::External)?;
+        proc.create_breakpoint_site(VirtualAddress::new(43), BreakpointType::Software, BreakpointScope::External)?;
+        proc.create_breakpoint_site(VirtualAddress::new(44), BreakpointType::Software, BreakpointScope::External)?;
+        proc.create_breakpoint_site(VirtualAddress::new(45), BreakpointType::Software, BreakpointScope::External)?;
 
-        let s1 = proc.breakpoint_sites.get_by_address(VirtualAddress::new(44)).expect("Failed to get breakpoint site 1");
+        let s1 = proc.breakpoint_sites.get_by_address(VirtualAddress::new(44))?;
         assert!(proc.breakpoint_sites().contains_address(VirtualAddress::new(44)), "Expected breakpoint to exist");
         assert_eq!(VirtualAddress::new(44), s1.address());
 
         // NOTE: c++ const tests ignored
 
-        let s2 = proc.breakpoint_sites().get_by_id(s1.id() + 1).expect("Failed to get breakpoint site 2");
+        let s2 = proc.breakpoint_sites().get_by_id(s1.id() + 1)?;
         assert!(proc.breakpoint_sites().contains_id(s1.id() + 1), "Expected breakpoint with id to exist");
         assert_eq!(s2.id(), s1.id() + 1, "Unexpected id for breakpoint 2");
         assert_eq!(VirtualAddress::new(45), s2.address(), "Unexpected address for breakpoint 2");
 
         // NOTE: more const tests ignored
+        Ok(())
     }
 
     #[test]
-    fn cannot_find_breakpoint_site_test() {
-        let mut proc = Process::launch("target/debug/run_endlessly", true, StdoutReplacement::None).expect("Failed to create breakpoint site");
+    fn cannot_find_breakpoint_site_test() -> Result<(), Error> {
+        let mut proc = Process::launch("target/debug/run_endlessly", true, StdoutReplacement::None)?;
 
         assert!(proc.breakpoint_sites().get_by_address(VirtualAddress::new(44)).is_err(), "Unexpected breakpoint at address");
         assert!(proc.breakpoint_sites().get_by_id(44).is_err(), "Unexpected breakpoint with id");
+
+        Ok(())
     }
 
     #[test]
-    fn breakpoint_site_list_and_emptiness_test() {
-        let mut proc = Process::launch("target/debug/run_endlessly", true, StdoutReplacement::None).expect("Failed to launch process");
+    fn breakpoint_site_list_and_emptiness_test() -> Result<(), Error> {
+        let mut proc = Process::launch("target/debug/run_endlessly", true, StdoutReplacement::None)?;
 
         assert!(proc.breakpoint_sites().is_empty(), "Expected empty breakpoint list on launch");
         assert_eq!(0, proc.breakpoint_sites().len(), "Expected zero length breakpoint list on launch");
 
-        proc.create_breakpoint_site(VirtualAddress::new(42), BreakpointType::Software, BreakpointScope::Internal).expect("Failed to create first breakpoint site");
+        proc.create_breakpoint_site(VirtualAddress::new(42), BreakpointType::Software, BreakpointScope::Internal)?;
         assert_eq!(false, proc.breakpoint_sites().is_empty(), "Expected non-empty breakpoint list after create");
         assert_eq!(1, proc.breakpoint_sites().len(), "Expected singleton breakpoint list after create");
 
-        proc.create_breakpoint_site(VirtualAddress::new(43), BreakpointType::Software, BreakpointScope::Internal).expect("Failed to create second breakpoint site");
+        proc.create_breakpoint_site(VirtualAddress::new(43), BreakpointType::Software, BreakpointScope::Internal)?;
         assert_eq!(false, proc.breakpoint_sites.is_empty(), "Expected non-empty breakpoint list after second breakpoint created");
         assert_eq!(2, proc.breakpoint_sites().len(), "Expected breakpoint list of length 2 after second breakpoint created");
+
+        Ok(())
     }
 
     #[test]
-    fn can_iterate_breakpoint_sites_test() {
-        let mut proc = Process::launch("target/debug/run_endlessly", true, StdoutReplacement::None).expect("Failed to launch process");
+    fn can_iterate_breakpoint_sites_test() -> Result<(), Error> {
+        let mut proc = Process::launch("target/debug/run_endlessly", true, StdoutReplacement::None)?;
 
         {
-            proc.create_breakpoint_site(VirtualAddress::new(42), BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint site 1");
-            proc.create_breakpoint_site(VirtualAddress::new(43), BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint site 2");
-            proc.create_breakpoint_site(VirtualAddress::new(44), BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint site 3");
-            proc.create_breakpoint_site(VirtualAddress::new(45), BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint site 4");
+            proc.create_breakpoint_site(VirtualAddress::new(42), BreakpointType::Software, BreakpointScope::External)?;
+            proc.create_breakpoint_site(VirtualAddress::new(43), BreakpointType::Software, BreakpointScope::External)?;
+            proc.create_breakpoint_site(VirtualAddress::new(44), BreakpointType::Software, BreakpointScope::External)?;
+            proc.create_breakpoint_site(VirtualAddress::new(45), BreakpointType::Software, BreakpointScope::External)?;
         }
 
         {
@@ -1012,31 +1032,33 @@ mod test {
                 addr += 1;
             }
         }
+
+        Ok(())
     }
 
     #[test]
-    fn breakpoint_on_address_test() {
+    fn breakpoint_on_address_test() -> Result<(), Error> {
         let close_on_exec = false;
-        let mut channel = Pipe::create(close_on_exec).expect("Failed to create pipe");
+        let mut channel = Pipe::create(close_on_exec)?;
         let exec_path = "target/debug/hello_rsdb";
 
-        let mut proc = Process::launch(exec_path, true, StdoutReplacement::Fd(channel.write_fd())).expect("Failed to launch process");
+        let mut proc = Process::launch(exec_path, true, StdoutReplacement::Fd(channel.write_fd()))?;
         channel.close_write();
 
         let offset = get_entry_point_offset(Path::new(exec_path));
         let load_address = get_load_address(proc.pid(), offset);
 
         let bp = proc.create_breakpoint_site(load_address, BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint");
-        proc.enable_breakpoint(bp).expect("Failed to enable breakpoint");
-        proc.resume().expect("Failed to resume");
-        let reason = proc.wait_on_signal().expect("Failed to wait");
+        proc.enable_breakpoint(bp)?;
+        proc.resume()?;
+        let reason = proc.wait_on_signal()?;
 
         assert!(reason.reason.is_stopped(), "Unexpected stop reason");
         assert_eq!(reason.info, SIGTRAP, "Unexpected stop info");
         assert_eq!(proc.get_pc(), load_address, "Unexpected program counter");
 
-        proc.resume().expect("Failed to resume");
-        let reason = proc.wait_on_signal().expect("Failed to wait after resume");
+        proc.resume()?;
+        let reason = proc.wait_on_signal()?;
 
         assert_eq!(reason.reason, ProcessState::Exited, "Unexpected wait reason after resume");
         assert_eq!(reason.info, 0, "Unexpected wait info after resume");
@@ -1047,19 +1069,23 @@ mod test {
             s
         };
         assert_eq!("Hello, rsdb!\n", data, "Unexpected output");
+
+        Ok(())
     }
 
     #[test]
-    fn can_remove_breakpoint_sites() {
-        let mut proc = Process::launch("target/debug/hello_rsdb", true, StdoutReplacement::None).expect("Failed to launch process");
+    fn can_remove_breakpoint_sites() -> Result<(), Error> {
+        let mut proc = Process::launch("target/debug/hello_rsdb", true, StdoutReplacement::None)?;
 
-        let bp1_id = proc.create_breakpoint_site(VirtualAddress::new(42), BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint site 1");
-        proc.create_breakpoint_site(VirtualAddress::new(43), BreakpointType::Software, BreakpointScope::External).expect("Failed to create breakpoint site 2");
+        let bp1_id = proc.create_breakpoint_site(VirtualAddress::new(42), BreakpointType::Software, BreakpointScope::External)?;
+        proc.create_breakpoint_site(VirtualAddress::new(43), BreakpointType::Software, BreakpointScope::External)?;
         assert_eq!(2, proc.breakpoint_sites().len(), "Unexpected number of breakpoints after create");
 
-        proc.remove_breakpoint_by_id(bp1_id).expect("Failed to remove breakpoint by id");
-        proc.remove_breakpoint_by_address(VirtualAddress::new(43)).expect("Failed to remove breakpoint by address");
+        proc.remove_breakpoint_by_id(bp1_id)?;
+        proc.remove_breakpoint_by_address(VirtualAddress::new(43))?;
         assert!(proc.breakpoint_sites().is_empty(), "Expected breakpoints to be removed");
+
+        Ok(())
     }
 
     #[test]
