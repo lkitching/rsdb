@@ -14,11 +14,11 @@ use crate::interop;
 use crate::interop::{ptrace, setpgid, ForkResult};
 use crate::pipe::Pipe;
 use crate::process::PIDParseError::OutOfRange;
-use crate::register::{RegisterId, Registers, DebugRegisterIndex};
+use crate::register::{RegisterId, Registers, DebugRegisterIndex, DebugStatusRegister};
 use crate::types::{StoppointMode, TryFromBytes, VirtualAddress};
 use crate::stoppoint_collection::{StopPoint, StopPointCollection};
 use crate::breakpoint_site::{BreakpointScope, BreakpointSite, BreakpointType};
-use crate::watchpoint::{WatchPoint};
+use crate::watchpoint::{WatchPoint, WatchPointUpdate};
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum ProcessState {
@@ -63,7 +63,7 @@ pub struct Process {
     watchpoints: StopPointCollection<WatchPoint>
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum TrapType {
     SingleStep,
     SoftwareBreak,
@@ -85,10 +85,19 @@ impl TrapType {
 }
 
 #[derive(Copy, Clone, Debug)]
+enum TrapInfo {
+    SoftwareBreakpoint { breakpoint_id: <BreakpointSite as StopPoint>::IdType },
+    HardwareBreakpoint { breakpoint_id: <BreakpointSite as StopPoint>::IdType },
+    WatchPoint(<WatchPoint as StopPoint>::IdType, WatchPointUpdate),
+    SingleStep,
+    Unknown
+}
+
+#[derive(Copy, Clone, Debug)]
 pub struct StopReason {
     pub reason: ProcessState,
     pub info: c_int,
-    trap_reason: Option<TrapType>
+    trap_reason: Option<TrapInfo>
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -156,9 +165,21 @@ impl fmt::Display for StopReason {
                 write!(f, "terminated with signal {}", signal_description(self.info))
             },
             ProcessState::Stopped(addr_opt) => {
+                let trap_message = match self.trap_reason {
+                    None | Some(TrapInfo::Unknown) => String::new(),
+                    Some(TrapInfo::SingleStep) => String::from(" (single step)"),
+                    Some(TrapInfo::SoftwareBreakpoint { breakpoint_id }) => format!(" (breakpoint {})", breakpoint_id),
+                    Some(TrapInfo::HardwareBreakpoint { breakpoint_id }) => format!(" (breakpoint {})", breakpoint_id),
+                    Some(TrapInfo::WatchPoint(watchpoint_id, update)) => {
+                        match update {
+                            WatchPointUpdate::Unchanged(value) => format!(" (watchpoint {})\nValue: {:#018x}", watchpoint_id, value),
+                            WatchPointUpdate::Updated { old_value, new_value } => format!(" (watchpoint {})\nOld Value: {:#018x}\nNew Value: {:#018x}", watchpoint_id, old_value, new_value)
+                        }
+                    }
+                };
                 match addr_opt {
-                    None => write!(f, "stopped with signal {}", signal_description(self.info)),
-                    Some(addr) => write!(f, "stopped with signal {} at {}", signal_description(self.info), addr)
+                    None => write!(f, "stopped with signal {}{}", signal_description(self.info), trap_message),
+                    Some(addr) => write!(f, "stopped with signal {} at {}{}", signal_description(self.info), addr, trap_message)
                 }
             }
         }
@@ -177,6 +198,11 @@ fn exit_with_perror(channel: &mut Pipe, error: Error) -> ! {
 pub enum StdoutReplacement {
     None,
     Fd(RawFd)
+}
+
+pub enum StopPointId {
+    Breakpoint(<BreakpointSite as StopPoint>::IdType),
+    Watchpoint(<WatchPoint as StopPoint>::IdType)
 }
 
 impl Process {
@@ -305,15 +331,46 @@ impl Process {
         if self.is_attached && stop_reason.reason.is_stopped() {
             // read all registers and get program counter for stop state
             self.read_all_registers()?;
-            self.augment_stop_reason(&mut stop_reason)?;
 
             let pc = self.get_pc();
             stop_reason.reason.set_pc(pc);
 
-            // update program counter to point to breakpoint if it's the next instruction
-            let instr_begin = pc - 1;
-            if stop_reason.info == SIGTRAP && self.breakpoint_sites().enabled_stoppoint_at_address(instr_begin) {
-                self.set_pc(instr_begin)?;
+            // see if we stopped due to a trap
+            // if so collect further info about the reason for the stop
+            if let Some(trap_type) = self.get_trap_type(stop_reason.info)? {
+                let trap_info = match trap_type {
+                    TrapType::SoftwareBreak => {
+                        let breakpoint = self.breakpoint_sites.get_by_address(pc)?;
+                        let breakpoint_id = breakpoint.id();
+
+                        if breakpoint.is_enabled() {
+                            // update program counter to point to breakpoint if it's the next instruction
+                            let instr_begin = pc - 1;
+                            self.set_pc(instr_begin)?;
+                        }
+
+                        TrapInfo::SoftwareBreakpoint { breakpoint_id }
+                    },
+                    TrapType::HardwareBreak => {
+                        let id = self.get_current_hardware_stoppoint();
+                        match id {
+                            StopPointId::Breakpoint(breakpoint_id) => {
+                                // at hardware breakpoint
+                                TrapInfo::HardwareBreakpoint { breakpoint_id }
+                            },
+                            StopPointId::Watchpoint(watchpoint_id) => {
+                                // re-read watched data
+                                let update = self.update_watchpoint_data(watchpoint_id)?;
+                                TrapInfo::WatchPoint(watchpoint_id, update)
+                            }
+                        }
+                    },
+                    TrapType::SingleStep => TrapInfo::SingleStep,
+                    TrapType::Unknown => TrapInfo::Unknown
+                };
+
+                stop_reason.trap_reason = Some(trap_info);
+
             }
         }
 
@@ -321,14 +378,14 @@ impl Process {
         Ok(stop_reason)
     }
 
-    fn augment_stop_reason(&self, reason: &mut StopReason) -> Result<(), Error> {
-        let info = ptrace::get_sig_info(self.pid)?;
-        if reason.info == SIGTRAP {
+    fn get_trap_type(&self, sig: c_int) -> Result<Option<TrapType>, Error> {
+        if sig == SIGTRAP {
+            let info = ptrace::get_sig_info(self.pid)?;
             let trap_reason = TrapType::from_code(info.si_code);
-            reason.trap_reason = Some(trap_reason);
+            Ok(Some(trap_reason))
+        } else {
+            Ok(None)
         }
-
-        Ok(())
     }
 
     pub fn step_instruction(&mut self) -> Result<StopReason, Error> {
@@ -359,6 +416,26 @@ impl Process {
 
     pub fn write_user_area(&mut self, offset: usize, word: usize) -> Result<(), Error> {
         self.registers.write_user_area(offset, word)
+    }
+
+    pub fn get_current_hardware_stoppoint(&self) -> StopPointId {
+        let status_raw: u64 = self.registers.read_by_id_as(RegisterId::dr6);
+        let status = DebugStatusRegister::new(status_raw);
+        let index = status.active();
+        let register_id = index.register_id();
+        let addr: VirtualAddress = self.registers.read_by_id_as(register_id);
+
+        // see if the address is a hardware breakpoint
+        if self.breakpoint_sites().contains_address(addr) {
+            let site = self.breakpoint_sites.get_by_address(addr).expect("Expected to find hardware breakpoint at address");
+            StopPointId::Breakpoint(site.id())
+        } else {
+            // otherwise it *should* be a watchpoint
+            let watchpoint = self.watchpoints.get_by_address(addr).expect("Expected to find watchpoint at address");
+            StopPointId::Watchpoint(watchpoint.id())
+        }
+
+
     }
 
     pub fn pid(&self) -> pid_t {
@@ -457,10 +534,26 @@ impl Process {
         if self.watchpoints.contains_address(address) {
             Err(Error::from_message(format!("Watchpoint already created at address {}", address)))
         } else {
-            let wp = WatchPoint::new(address, mode, size);
+            let initial_data = self.read_memory(address, size)?;
+            let wp = WatchPoint::new(address, mode, size, initial_data);
             let id = wp.id();
             self.watchpoints.push(wp);
             Ok(id)
+        }
+    }
+
+    fn update_watchpoint_data(&mut self, watchpoint_id: <WatchPoint as StopPoint>::IdType) -> Result<WatchPointUpdate, Error> {
+        let data_bytes = {
+            let wp = self.watchpoints.get_by_id_mut(watchpoint_id)?;
+            let addr = wp.address();
+            let size = wp.size();
+            self.read_memory(addr, size)?
+        };
+
+        {
+            let wp = self.watchpoints.get_by_id_mut(watchpoint_id)?;
+            let update = wp.set_data(data_bytes);
+            Ok(update)
         }
     }
 
