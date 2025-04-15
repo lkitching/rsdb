@@ -1,10 +1,16 @@
 use std::{mem, ptr};
 use std::mem::MaybeUninit;
-use libc::{c_void, pid_t, user_fpregs_struct, user_regs_struct, size_t, PTRACE_SINGLESTEP, siginfo_t, PTRACE_GETSIGINFO};
+use libc::{c_int, c_void, pid_t, user_fpregs_struct, user_regs_struct, size_t, PTRACE_SINGLESTEP, siginfo_t, PTRACE_GETSIGINFO, PTRACE_SETOPTIONS};
 use libc::{ptrace, PTRACE_TRACEME, PTRACE_ATTACH, PTRACE_CONT, PTRACE_DETACH, PTRACE_GETREGS, PTRACE_GETFPREGS, PTRACE_PEEKUSER, PTRACE_POKEUSER, PTRACE_SETREGS, PTRACE_SETFPREGS};
-use libc::{PTRACE_PEEKDATA, PTRACE_POKEDATA};
+use libc::{PTRACE_PEEKDATA, PTRACE_POKEDATA, c_uint};
 use crate::error::*;
 use crate::types::VirtualAddress;
+
+pub fn request(request: c_uint, pid: pid_t) -> Result<(), Error> {
+    if unsafe { ptrace(request, pid) } < 0 {
+        Err(Error::from_errno("Request failed"))
+    } else { Ok(()) }
+}
 
 pub fn traceme() -> Result<(), Error> {
     if unsafe { ptrace(PTRACE_TRACEME, 0, ptr::null::<c_void>(), ptr::null::<c_void>()) } < 0 {
@@ -126,4 +132,10 @@ pub fn get_sig_info(pid: pid_t) -> Result<siginfo_t, Error> {
         let info = unsafe { info.assume_init() };
         Ok(info)
     }
+}
+
+pub fn set_options(pid: pid_t, options: c_int) -> Result<(), Error> {
+    if unsafe { ptrace(PTRACE_SETOPTIONS, pid, ptr::null::<c_void>(), options as usize as *const c_void) } < 0 {
+        Err(Error::from_errno("Failed to set options"))
+    } else { Ok(()) }
 }
