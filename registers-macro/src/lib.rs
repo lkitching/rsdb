@@ -807,3 +807,90 @@ pub fn registers(tokens: TokenStream) -> TokenStream {
 
     output
 }
+
+type SyscallId = u64;
+struct Syscall {
+    id: SyscallId,
+    name: String,
+}
+
+fn parse_syscall_id(tokens: &mut impl Iterator<Item=TokenTree>, context: &str) -> SyscallId {
+    let lit = parse_literal(tokens, context);
+    lit.parse().expect(&format!("Invalid u8 literal {}", context))
+}
+
+fn generate_syscall_type(calls: &[Syscall]) -> TokenStream {
+    // #[derive(Copy,Clone,PartialEq,Eq,Debug)]
+    // pub enum SyscallType {
+    //   syscall1,
+    //   syscall2,
+    //   ...
+    // }
+    let mut tokens = TokenStream::new();
+
+    let enum_def = vec![
+        TokenTree::Punct(Punct::new('#', Spacing::Alone)),
+        TokenTree::Group(Group::new(Delimiter::Bracket, TokenStream::from_iter(vec![
+            TokenTree::Ident(Ident::new("derive", Span::call_site())),
+            delimited_separated_by(Delimiter::Parenthesis, ',', vec![
+                ident("Copy"),
+                ident("Clone"),
+                ident("PartialEq"),
+                ident("Eq"),
+                ident("Debug")
+            ]),
+        ]))),
+        TokenTree::Ident(Ident::new("pub", Span::call_site())),
+        TokenTree::Ident(Ident::new("enum", Span::call_site())),
+        TokenTree::Ident(Ident::new("SyscallType", Span::call_site()))
+    ];
+
+    tokens.extend(enum_def);
+
+    let mut constructor_tokens = TokenStream::new();
+
+    for syscall in calls.iter() {
+        let cts = vec![
+            TokenTree::Ident(Ident::new(syscall.name.as_str(), Span::call_site())),
+            TokenTree::Punct(Punct::new(',', Spacing::Alone))
+        ];
+        constructor_tokens.extend(cts);
+    }
+
+    let constructor_group = vec![
+        TokenTree::Group(Group::new(Delimiter::Brace, constructor_tokens))
+    ];
+
+    tokens.extend(constructor_group);
+
+    tokens
+}
+
+#[proc_macro]
+pub fn syscalls(tokens: TokenStream) -> TokenStream {
+    let mut calls = Vec::new();
+    let mut tok_iter = tokens.into_iter();
+
+    while let Some(token_tree) = tok_iter.next() {
+        let ident = expect_ident(token_tree, "Expected syscall definition");
+        assert_eq!("call", ident, "Expected 'call' literal");
+
+        let mut call_tokens = parse_group(&mut tok_iter, Delimiter::Parenthesis, "following 'call'").into_iter();
+        let name = parse_ident(&mut call_tokens, "syscall name");
+        consume_punct(&mut call_tokens, ',', "after syscall name");
+        let id = parse_syscall_id(&mut call_tokens, "after syscall name");
+        expect_end(&mut call_tokens, "after syscall id");
+
+        calls.push(Syscall { id, name });
+
+        // consume ',' separator if one exists
+        if let Some(tok) = tok_iter.next() {
+            expect_punct(tok, "after call definition");
+        }
+    }
+
+    let mut output = TokenStream::new();
+    output.extend(generate_syscall_type(calls.as_slice()));
+
+    output
+}
