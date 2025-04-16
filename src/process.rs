@@ -20,6 +20,7 @@ use crate::types::{StoppointMode, TryFromBytes, VirtualAddress};
 use crate::stoppoint_collection::{StopPoint, StopPointCollection};
 use crate::breakpoint_site::{BreakpointScope, BreakpointSite, BreakpointType};
 use crate::watchpoint::{WatchPoint, WatchPointUpdate};
+use crate::syscalls::{SyscallType};
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum ProcessState {
@@ -182,7 +183,15 @@ impl fmt::Display for StopReason {
                         }
                     },
                     Some(TrapInfo::Syscall(syscall_info)) => {
-                        format!(" (syscall {})", syscall_info.id)
+                        match syscall_info.direction {
+                            SyscallDirection::Entry { args } => {
+                                let arg_strs: Vec<String> = args.iter().map(|arg| format!("{:#0x}", arg)).collect();
+                                format!(" (syscall entry)\nsyscall: {:?}({})", syscall_info.syscall, arg_strs.join(", "))
+                            },
+                            SyscallDirection::Exit(ret) => {
+                                format!(" (syscall exit)\nsyscall returned {:#x}", ret)
+                            }
+                        }
                     }
                 };
                 match addr_opt {
@@ -216,18 +225,18 @@ pub enum StopPointId {
 #[derive(Clone, Debug)]
 pub enum SyscallCatchPolicy {
     None,
-    Some(HashSet<u64>),
+    Some(HashSet<SyscallType>),
     All
 }
 
 impl SyscallCatchPolicy {
-    fn should_resume(&self, syscall_id: u64) -> bool {
+    fn should_resume(&self, syscall: SyscallType) -> bool {
         match self {
             // NOTE: this shouldn't happen since PTRACE_CONT
             // should be used to resume when not catching system calls
             Self::None => true,
             Self::Some(to_catch) => {
-                !to_catch.contains(&syscall_id)
+                !to_catch.contains(&syscall)
             },
             _ => false
         }
@@ -242,7 +251,7 @@ enum SyscallDirection {
 
 #[derive(Copy, Clone, Debug)]
 struct SyscallInfo {
-    id: u64,
+    syscall: SyscallType,
     direction: SyscallDirection
 }
 
@@ -423,19 +432,23 @@ impl Process {
                         }
                     },
                     TrapType::Syscall => {
+                        let id = self.registers.read_by_id_as(RegisterId::orig_rax);
+                        let syscall = SyscallType::from_id(id).expect(&format!("Unknown syscall id {}", id));
+
                         if self.expecting_syscall_exit {
                             // assume stop is due to syscall exit
                             // syscall id is stored in orig_rax register
                             // return value in rax
                             let ret = self.registers.read_by_id_as(RegisterId::rax);
                             let call_info = SyscallInfo {
-                                id: self.registers.read_by_id_as(RegisterId::orig_rax),
+                                syscall,
                                 direction: SyscallDirection::Exit(ret)
                             };
+
+                            self.expecting_syscall_exit = false;
+
                             TrapInfo::Syscall(call_info)
                         } else {
-                            let id = self.registers.read_by_id_as(RegisterId::orig_rax);
-
                             // read args from registers
                             let arg_registers = [
                                 RegisterId::rdi, RegisterId::rsi, RegisterId::rdx,
@@ -451,7 +464,7 @@ impl Process {
                             };
 
                             let call_info = SyscallInfo {
-                                id,
+                                syscall,
                                 direction: SyscallDirection::Entry { args }
                             };
 
@@ -469,7 +482,7 @@ impl Process {
                 // this is required by the current stop policy
                 // otherwise resume
                 if let TrapInfo::Syscall(syscall_info) = trap_info {
-                    if self.syscall_catch_policy.should_resume(syscall_info.id) {
+                    if self.syscall_catch_policy.should_resume(syscall_info.syscall) {
                         self.resume()?;
                         return self.wait_on_signal();
                     }
@@ -895,8 +908,9 @@ impl Drop for Process {
 #[cfg(test)]
 mod test {
     use std::io::{self, BufReader, BufRead};
-    use std::fs::File;
+    use std::fs::{File, OpenOptions};
     use std::mem;
+    use std::os::fd::AsRawFd;
     use std::path::{Path, PathBuf};
     use std::process::{Command};
     use libc::{ESRCH, Elf64_Addr, Elf64_Ehdr};
@@ -1473,6 +1487,41 @@ mod test {
         {
             let s = read_next_string(&mut channel);
             assert_eq!("Putting pineapple on pizza", s.trim(), "Unexpected message after hardware breakpoint");
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn syscall_catchpoints_test() -> Result<(), Error> {
+        let dev_null = OpenOptions::new().write(true).open("/dev/null")?;
+        let mut proc = Process::launch("target/debug/anti_debugger", true, StdoutReplacement::Fd(dev_null.as_raw_fd()))?;
+
+        let policy = SyscallCatchPolicy::Some([SyscallType::write].into_iter().collect());
+        proc.set_syscall_catch_policy(policy);
+
+        proc.resume()?;
+        let reason = proc.wait_on_signal()?;
+
+        assert!(reason.reason.is_stopped(), "Expected process to be stopped");
+        assert_eq!(reason.info, SIGTRAP, "Expected stop due to SIGTRAP");
+
+        if let Some(TrapInfo::Syscall(SyscallInfo { syscall: SyscallType::write, direction: SyscallDirection::Entry { .. } })) = reason.trap_reason {
+            // expected
+        } else {
+            panic!("Expected trap due to write syscall entry");
+        }
+
+        proc.resume()?;
+        let reason = proc.wait_on_signal()?;
+
+        assert!(reason.reason.is_stopped(), "Expected process to be stopped");
+        assert_eq!(reason.info, SIGTRAP, "Expected stop due to trap");
+
+        if let Some(TrapInfo::Syscall(SyscallInfo { syscall: SyscallType::write, direction: SyscallDirection::Exit(_)})) = reason.trap_reason {
+            // expected
+        } else {
+            panic!("Expected trap due to write syscall exit");
         }
 
         Ok(())

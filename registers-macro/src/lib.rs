@@ -820,7 +820,7 @@ fn parse_syscall_id(tokens: &mut impl Iterator<Item=TokenTree>, context: &str) -
 }
 
 fn generate_syscall_type(calls: &[Syscall]) -> TokenStream {
-    // #[derive(Copy,Clone,PartialEq,Eq,Debug)]
+    // #[derive(Copy,Clone,PartialEq,Eq,Debug,Hash)]
     // pub enum SyscallType {
     //   syscall1,
     //   syscall2,
@@ -837,7 +837,8 @@ fn generate_syscall_type(calls: &[Syscall]) -> TokenStream {
                 ident("Clone"),
                 ident("PartialEq"),
                 ident("Eq"),
-                ident("Debug")
+                ident("Debug"),
+                ident("Hash")
             ]),
         ]))),
         TokenTree::Ident(Ident::new("pub", Span::call_site())),
@@ -866,6 +867,182 @@ fn generate_syscall_type(calls: &[Syscall]) -> TokenStream {
     tokens
 }
 
+fn generate_syscall_type_fromstr(calls: &[Syscall]) -> TokenStream {
+    // impl std::str::FromStr for SyscallType {
+    //  type Err = ();
+    //  fn from_str(s: &str) -> Result<Self, Self::Err> {
+    //    match s {
+    //      "name1" => Ok(Self::name1),
+    //      "name2" => Ok(Self::name2),
+    //      ...
+    //      _ => Err(())
+    //   }
+    // }
+
+    let matches = {
+        let mut tokens = TokenStream::new();
+        for call in calls.iter() {
+            let match_toks = vec![
+                TokenTree::Literal(Literal::string(call.name.as_str())),
+                TokenTree::Punct(Punct::new('=', Spacing::Joint)),
+                TokenTree::Punct(Punct::new('>', Spacing::Alone)),
+                ident("Ok"),
+                TokenTree::Group(Group::new(Delimiter::Parenthesis, TokenStream::from_iter(vec![
+                    ident("Self"),
+                    TokenTree::Punct(Punct::new(':', Spacing::Joint)),
+                    TokenTree::Punct(Punct::new(':', Spacing::Alone)),
+                    ident(call.name.as_str())
+                ]))),
+                TokenTree::Punct(Punct::new(',', Spacing::Alone))
+            ];
+            tokens.extend(match_toks);
+        }
+
+        // add catch-all arm for anything else
+        tokens.extend(vec![
+            ident("_"),
+            TokenTree::Punct(Punct::new('=', Spacing::Joint)),
+            TokenTree::Punct(Punct::new('>', Spacing::Alone)),
+            ident("Err"),
+            TokenTree::Group(Group::new(Delimiter::Parenthesis, TokenStream::from_iter(vec![
+                TokenTree::Group(Group::new(Delimiter::Parenthesis, TokenStream::new()))
+            ])))
+        ]);
+
+        tokens
+    };
+
+    let from_str_tokens = vec![
+        ident("fn"),
+        ident("from_str"),
+        TokenTree::Group(Group::new(Delimiter::Parenthesis, TokenStream::from_iter(vec![
+            ident("s"),
+            TokenTree::Punct(Punct::new(':', Spacing::Alone)),
+            TokenTree::Punct(Punct::new('&', Spacing::Alone)),
+            ident("str")
+        ]))),
+        TokenTree::Punct(Punct::new('-', Spacing::Joint)),
+        TokenTree::Punct(Punct::new('>', Spacing::Alone)),
+        ident("Result"),
+        TokenTree::Punct(Punct::new('<', Spacing::Alone)),
+        ident("Self"),
+        TokenTree::Punct(Punct::new(',', Spacing::Alone)),
+        ident("Self"),
+        TokenTree::Punct(Punct::new(':', Spacing::Joint)),
+        TokenTree::Punct(Punct::new(':', Spacing::Alone)),
+        ident("Err"),
+        TokenTree::Punct(Punct::new('>', Spacing::Alone)),
+        TokenTree::Group(Group::new(Delimiter::Brace, TokenStream::from_iter(vec![
+            ident("match"),
+            ident("s"),
+            TokenTree::Group(Group::new(Delimiter::Brace, matches))
+        ])))
+    ];
+
+    let impl_tokens = {
+        let mut inner_tokens = TokenStream::from_iter(vec![
+            ident("type"),
+            ident("Err"),
+            TokenTree::Punct(Punct::new('=', Spacing::Alone)),
+            TokenTree::Group(Group::new(Delimiter::Parenthesis, TokenStream::new())),
+            TokenTree::Punct(Punct::new(';', Spacing::Alone))
+        ]);
+        inner_tokens.extend(from_str_tokens);
+
+        TokenStream::from_iter(vec![
+            ident("impl"),
+            ident("std"),
+            TokenTree::Punct(Punct::new(':', Spacing::Joint)),
+            TokenTree::Punct(Punct::new(':', Spacing::Alone)),
+            ident("str"),
+            TokenTree::Punct(Punct::new(':', Spacing::Joint)),
+            TokenTree::Punct(Punct::new(':', Spacing::Alone)),
+            ident("FromStr"),
+            ident("for"),
+            ident("SyscallType"),
+            TokenTree::Group(Group::new(Delimiter::Brace, inner_tokens))
+        ])
+    };
+
+    impl_tokens
+}
+
+fn generate_syscall_impl(calls: &[Syscall]) -> TokenStream {
+    // impl Syscall {
+    //  pub fn from_id(id: u64) -> Result<Self, ()> {
+    //    match id {
+    //      id1 => Ok(Self::name1),
+    //      id2 => Ok(Self::name2),
+    //      ...
+    //      _ => Err(())
+    //    }
+    //   }
+    // }
+    let matches = {
+        let mut matches = TokenStream::new();
+
+        for call in calls.iter() {
+            let match_tokens = TokenStream::from_iter(vec![
+                TokenTree::Literal(Literal::u64_unsuffixed(call.id)),
+                TokenTree::Punct(Punct::new('=', Spacing::Joint)),
+                TokenTree::Punct(Punct::new('>', Spacing::Alone)),
+                ident("Ok"),
+                TokenTree::Group(Group::new(Delimiter::Parenthesis, TokenStream::from_iter(vec![
+                    ident("Self"),
+                    TokenTree::Punct(Punct::new(':', Spacing::Joint)),
+                    TokenTree::Punct(Punct::new(':', Spacing::Alone)),
+                    ident(call.name.as_str())
+                ]))),
+                TokenTree::Punct(Punct::new(',', Spacing::Alone))
+            ]);
+            matches.extend(match_tokens);
+        }
+
+        // add catch-all arm for anything else
+        matches.extend(vec![
+            ident("_"),
+            TokenTree::Punct(Punct::new('=', Spacing::Joint)),
+            TokenTree::Punct(Punct::new('>', Spacing::Alone)),
+            ident("Err"),
+            TokenTree::Group(Group::new(Delimiter::Parenthesis, TokenStream::from_iter(vec![
+                TokenTree::Group(Group::new(Delimiter::Parenthesis, TokenStream::new()))
+            ])))
+        ]);
+
+        matches
+    };
+
+    let from_id_tokens = TokenStream::from_iter(vec![
+        ident("pub"),
+        ident("fn"),
+        ident("from_id"),
+        TokenTree::Group(Group::new(Delimiter::Parenthesis, TokenStream::from_iter(vec![
+            ident("id"),
+            TokenTree::Punct(Punct::new(':', Spacing::Alone)),
+            ident("u64")
+        ]))),
+        TokenTree::Punct(Punct::new('-', Spacing::Joint)),
+        TokenTree::Punct(Punct::new('>', Spacing::Alone)),
+        ident("Result"),
+        TokenTree::Punct(Punct::new('<', Spacing::Alone)),
+        ident("Self"),
+        TokenTree::Punct(Punct::new(',', Spacing::Alone)),
+        TokenTree::Group(Group::new(Delimiter::Parenthesis, TokenStream::new())),
+        TokenTree::Punct(Punct::new('>', Spacing::Alone)),
+        TokenTree::Group(Group::new(Delimiter::Brace, TokenStream::from_iter(vec![
+            ident("match"),
+            ident("id"),
+            TokenTree::Group(Group::new(Delimiter::Brace, matches))
+        ])))
+    ]);
+
+    TokenStream::from_iter(vec![
+        ident("impl"),
+        ident("SyscallType"),
+        TokenTree::Group(Group::new(Delimiter::Brace, from_id_tokens))
+    ])
+}
+
 #[proc_macro]
 pub fn syscalls(tokens: TokenStream) -> TokenStream {
     let mut calls = Vec::new();
@@ -891,6 +1068,8 @@ pub fn syscalls(tokens: TokenStream) -> TokenStream {
 
     let mut output = TokenStream::new();
     output.extend(generate_syscall_type(calls.as_slice()));
+    output.extend(generate_syscall_type_fromstr(calls.as_slice()));
+    output.extend(generate_syscall_impl(calls.as_slice()));
 
     output
 }
