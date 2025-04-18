@@ -398,23 +398,24 @@ impl Process {
             // read all registers and get program counter for stop state
             self.read_all_registers()?;
 
-            let pc = self.get_pc();
+            let mut pc = self.get_pc();
             stop_reason.reason.set_pc(pc);
 
             // see if we stopped due to a trap
             // if so collect further info about the reason for the stop
             if let Some(trap_type) = self.get_trap_type(&mut stop_reason)? {
+
+                // update program counter to point to breakpoint if it's the next instruction
+                let instr_begin = pc - 1;
+                if self.breakpoint_sites().enabled_stoppoint_at_address(instr_begin) {
+                    pc = instr_begin;
+                    self.set_pc(pc)?;
+                }
+
                 let trap_info = match trap_type {
                     TrapType::SoftwareBreak => {
                         let breakpoint = self.breakpoint_sites.get_by_address(pc)?;
                         let breakpoint_id = breakpoint.id();
-
-                        if breakpoint.is_enabled() {
-                            // update program counter to point to breakpoint if it's the next instruction
-                            let instr_begin = pc - 1;
-                            self.set_pc(instr_begin)?;
-                        }
-
                         TrapInfo::SoftwareBreakpoint { breakpoint_id }
                     },
                     TrapType::HardwareBreak => {
