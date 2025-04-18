@@ -313,6 +313,28 @@ impl Registers {
 
 pub type DebugControlRegister = u64;
 
+pub struct DebugStatusRegister {
+    value: u64
+}
+
+impl DebugStatusRegister {
+    pub fn new(value: u64) -> Self { Self { value } }
+    pub fn active(&self) -> DebugRegisterIndex {
+        // low 4 bits in the status register indicates which debug register
+        // was hit
+        // e.g. bit 1 set indicates dr1 was active
+        for register_index in DebugRegisterIndex::values() {
+            let mask = 1 << register_index.index;
+            if self.value & mask == mask {
+                return register_index;
+            }
+        }
+
+        // should never happen(?)
+        panic!("No debug registers active in status register: {:#018x}", self.value);
+    }
+}
+
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct DebugRegisterIndex {
     index: u8

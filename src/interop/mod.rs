@@ -65,3 +65,9 @@ pub fn str_signal(sig: c_int) -> String {
     let s = unsafe { strsignal(sig) };
     unsafe { CStr::from_ptr(s) }.to_str().expect("Failed to read CStr").to_owned()
 }
+
+pub fn setpgid(pid: pid_t, pgid: pid_t) -> Result<(), Error> {
+    if unsafe { libc::setpgid(pid, pgid) } < 0 {
+        Err(Error::from_errno("Could not set process group id"))
+    } else { Ok(()) }
+}

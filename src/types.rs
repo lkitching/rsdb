@@ -506,6 +506,14 @@ impl From<VirtualAddress> for Value {
     }
 }
 
+impl TryFrom<Value> for VirtualAddress {
+    type Error = RegisterValueError;
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        let addr = usize::try_from(value)?;
+        Ok(Self::new(addr))
+    }
+}
+
 impl Add<isize> for VirtualAddress {
     type Output = Self;
     fn add(self, rhs: isize) -> Self {

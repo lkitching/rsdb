@@ -6,6 +6,7 @@ mod memory;
 mod disassemble;
 mod help;
 mod watchpoint;
+mod catchpoint;
 
 use std::fmt::{self, Formatter};
 use std::str::FromStr;
@@ -23,7 +24,8 @@ use memory::MemoryCommandHandler;
 use disassemble::DisassembleCommandHandler;
 pub use help::HelpCommandHandler;
 use librsdb::types::VirtualAddress;
-use crate::debugger::command::watchpoint::WatchpointCommandHandler;
+use watchpoint::WatchpointCommandHandler;
+use catchpoint::CatchpointCommandHandler;
 
 pub trait Command {
     fn exec(&self, args: &[&str], debugger: &mut Debugger) -> Result<(), DebuggerError>;
@@ -35,6 +37,7 @@ pub trait Command {
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum CommandType {
     Breakpoint,
+    Catchpoint,
     Continue,
     Disassemble,
     Memory,
@@ -48,6 +51,7 @@ impl CommandType {
     pub fn get_handler(self) -> Box<dyn Command> {
         match self {
             Self::Breakpoint => Box::new(BreakpointCommandHandler {}),
+            Self::Catchpoint => Box::new(CatchpointCommandHandler {}),
             Self::Continue => Box::new(ContinueCommandHandler {}),
             Self::Disassemble => Box::new(DisassembleCommandHandler {}),
             Self::Memory => Box::new(MemoryCommandHandler {}),
@@ -78,7 +82,11 @@ impl FromStr for CommandType {
         if "breakpoint".starts_with(s) {
             Ok(Self::Breakpoint)
         } else if "continue".starts_with(s) {
+            // NOTE: keep this before 'catchpoint'!
+            // we want 'c' to match 'continue' and not 'catchpoint'
             Ok(Self::Continue)
+        } else if "catchpoint".starts_with(s) {
+            Ok(Self::Catchpoint)
         } else if "disassemble".starts_with(s) {
             Ok(Self::Disassemble)
         } else if "memory".starts_with(s) {
@@ -133,4 +141,15 @@ fn handle_stop(process: &Process, reason: &StopReason) -> Result<(), Error> {
 pub fn parse_address(addr_str: &str) -> Result<VirtualAddress, CommandParseError> {
     VirtualAddress::from_str(addr_str)
         .map_err(|e| CommandParseError::message(format!("Address expected in hexadecimal: {}", e)))
+}
+
+#[cfg(test)]
+mod test {
+    use std::str::FromStr;
+    use crate::debugger::command::CommandType;
+
+    #[test]
+    fn command_type_from_str_test() {
+        assert_eq!(CommandType::Continue, CommandType::from_str("c").unwrap(), "Expected 'c' to be continue");
+    }
 }

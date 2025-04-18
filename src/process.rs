@@ -5,20 +5,22 @@ use std::fmt::{self, Formatter};
 use std::num::ParseIntError;
 use std::io::{Read, Write};
 use std::os::fd::{RawFd};
+use std::collections::HashSet;
 
-use libc::{pid_t, WIFEXITED, WIFSIGNALED, SIGKILL, STDOUT_FILENO, ADDR_NO_RANDOMIZE, SIGTRAP, process_vm_readv};
+use libc::{pid_t, WIFEXITED, WIFSIGNALED, SIGKILL, STDOUT_FILENO, ADDR_NO_RANDOMIZE, SIGTRAP, process_vm_readv, PTRACE_O_TRACESYSGOOD, PTRACE_SYSCALL, PTRACE_CONT};
 use libc::{c_int, waitpid, kill, SIGSTOP, SIGCONT, WEXITSTATUS, WTERMSIG, WIFSTOPPED, WSTOPSIG, iovec, c_void, c_ulong};
 
 use crate::error::{Error};
 use crate::interop;
-use crate::interop::{ptrace, ForkResult};
+use crate::interop::{ptrace, setpgid, ForkResult};
 use crate::pipe::Pipe;
 use crate::process::PIDParseError::OutOfRange;
-use crate::register::{RegisterId, Registers, DebugRegisterIndex};
+use crate::register::{RegisterId, Registers, DebugRegisterIndex, DebugStatusRegister};
 use crate::types::{StoppointMode, TryFromBytes, VirtualAddress};
 use crate::stoppoint_collection::{StopPoint, StopPointCollection};
 use crate::breakpoint_site::{BreakpointScope, BreakpointSite, BreakpointType};
-use crate::watchpoint::{WatchPoint};
+use crate::watchpoint::{WatchPoint, WatchPointUpdate};
+use crate::syscalls::{SyscallType};
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum ProcessState {
@@ -60,13 +62,48 @@ pub struct Process {
     is_attached: bool,
     registers: Registers,
     breakpoint_sites: StopPointCollection<BreakpointSite>,
-    watchpoints: StopPointCollection<WatchPoint>
+    watchpoints: StopPointCollection<WatchPoint>,
+    syscall_catch_policy: SyscallCatchPolicy,
+    expecting_syscall_exit: bool
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum TrapType {
+    SingleStep,
+    SoftwareBreak,
+    HardwareBreak,
+    Syscall,
+    Unknown
+}
+
+impl TrapType {
+    fn from_code(code: c_int) -> Self {
+        use libc::{TRAP_TRACE, SI_KERNEL, TRAP_HWBKPT};
+        match code {
+            TRAP_TRACE => Self::SingleStep,
+            // NOTE: linux uses SI_KERNEL for software breakpoints on x64!
+            SI_KERNEL => Self::SoftwareBreak,
+            TRAP_HWBKPT => Self::HardwareBreak,
+            _ => Self::Unknown
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+enum TrapInfo {
+    SoftwareBreakpoint { breakpoint_id: <BreakpointSite as StopPoint>::IdType },
+    HardwareBreakpoint { breakpoint_id: <BreakpointSite as StopPoint>::IdType },
+    WatchPoint(<WatchPoint as StopPoint>::IdType, WatchPointUpdate),
+    Syscall(SyscallInfo),
+    SingleStep,
+    Unknown
 }
 
 #[derive(Copy, Clone, Debug)]
 pub struct StopReason {
     pub reason: ProcessState,
-    pub info: c_int
+    pub info: c_int,
+    trap_reason: Option<TrapInfo>
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -96,17 +133,20 @@ impl StopReason {
         if WIFEXITED(wait_status) {
             Self {
                 reason: ProcessState::Exited,
-                info: WEXITSTATUS(wait_status)
+                info: WEXITSTATUS(wait_status),
+                trap_reason: None
             }
         } else if WIFSIGNALED(wait_status) {
             Self {
                 reason: ProcessState::Terminated,
-                info: WTERMSIG(wait_status)
+                info: WTERMSIG(wait_status),
+                trap_reason: None
             }
         } else if WIFSTOPPED(wait_status) {
             Self {
                 reason: ProcessState::stopped(),
-                info: WSTOPSIG(wait_status)
+                info: WSTOPSIG(wait_status),
+                trap_reason: None
             }
         } else {
             panic!("Unknown status for process");
@@ -131,9 +171,32 @@ impl fmt::Display for StopReason {
                 write!(f, "terminated with signal {}", signal_description(self.info))
             },
             ProcessState::Stopped(addr_opt) => {
+                let trap_message = match self.trap_reason {
+                    None | Some(TrapInfo::Unknown) => String::new(),
+                    Some(TrapInfo::SingleStep) => String::from(" (single step)"),
+                    Some(TrapInfo::SoftwareBreakpoint { breakpoint_id }) => format!(" (breakpoint {})", breakpoint_id),
+                    Some(TrapInfo::HardwareBreakpoint { breakpoint_id }) => format!(" (breakpoint {})", breakpoint_id),
+                    Some(TrapInfo::WatchPoint(watchpoint_id, update)) => {
+                        match update {
+                            WatchPointUpdate::Unchanged(value) => format!(" (watchpoint {})\nValue: {:#018x}", watchpoint_id, value),
+                            WatchPointUpdate::Updated { old_value, new_value } => format!(" (watchpoint {})\nOld Value: {:#018x}\nNew Value: {:#018x}", watchpoint_id, old_value, new_value)
+                        }
+                    },
+                    Some(TrapInfo::Syscall(syscall_info)) => {
+                        match syscall_info.direction {
+                            SyscallDirection::Entry { args } => {
+                                let arg_strs: Vec<String> = args.iter().map(|arg| format!("{:#0x}", arg)).collect();
+                                format!(" (syscall entry)\nsyscall: {:?}({})", syscall_info.syscall, arg_strs.join(", "))
+                            },
+                            SyscallDirection::Exit(ret) => {
+                                format!(" (syscall exit)\nsyscall returned {:#x}", ret)
+                            }
+                        }
+                    }
+                };
                 match addr_opt {
-                    None => write!(f, "stopped with signal {}", signal_description(self.info)),
-                    Some(addr) => write!(f, "stopped with signal {} at {}", signal_description(self.info), addr)
+                    None => write!(f, "stopped with signal {}{}", signal_description(self.info), trap_message),
+                    Some(addr) => write!(f, "stopped with signal {} at {}{}", signal_description(self.info), addr, trap_message)
                 }
             }
         }
@@ -154,13 +217,60 @@ pub enum StdoutReplacement {
     Fd(RawFd)
 }
 
+pub enum StopPointId {
+    Breakpoint(<BreakpointSite as StopPoint>::IdType),
+    Watchpoint(<WatchPoint as StopPoint>::IdType)
+}
+
+#[derive(Clone, Debug)]
+pub enum SyscallCatchPolicy {
+    None,
+    Some(HashSet<SyscallType>),
+    All
+}
+
+impl SyscallCatchPolicy {
+    fn should_resume(&self, syscall: SyscallType) -> bool {
+        match self {
+            // NOTE: this shouldn't happen since PTRACE_CONT
+            // should be used to resume when not catching system calls
+            Self::None => true,
+            Self::Some(to_catch) => {
+                !to_catch.contains(&syscall)
+            },
+            _ => false
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+enum SyscallDirection {
+    Entry { args: [u64; 6 ]},
+    Exit(u64)
+}
+
+#[derive(Copy, Clone, Debug)]
+struct SyscallInfo {
+    syscall: SyscallType,
+    direction: SyscallDirection
+}
+
 impl Process {
+    fn set_ptrace_options(pid: pid_t) -> Result<(), Error> {
+        ptrace::set_options(pid, PTRACE_O_TRACESYSGOOD)
+    }
+
     pub fn launch(path: &str, debug: bool, stdout_replacement: StdoutReplacement) -> Result<Self, Error> {
         // create pipe to communicate with child process
         let mut pipe = Pipe::create(true)?;
 
         match interop::fork()? {
             ForkResult::InChild => {
+                // move inferior process into its own process group
+                if let Err(e) = setpgid(0, 0) {
+                    exit_with_perror(&mut pipe, e);
+                }
+
                 // turn off ASLR for this process
                 interop::personality(ADDR_NO_RANDOMIZE)?;
                 //close read side of pipe
@@ -212,11 +322,14 @@ impl Process {
                     is_attached: debug,
                     registers: Registers::new(pid),
                     breakpoint_sites: StopPointCollection::new(),
-                    watchpoints: StopPointCollection::new()
+                    watchpoints: StopPointCollection::new(),
+                    syscall_catch_policy: SyscallCatchPolicy::None,
+                    expecting_syscall_exit: false
                 };
 
                 if debug {
                     proc.wait_on_signal()?;
+                    Self::set_ptrace_options(proc.pid)?;
                 }
 
                 Ok(proc)
@@ -239,9 +352,12 @@ impl Process {
             is_attached: true,
             registers,
             breakpoint_sites: StopPointCollection::new(),
-            watchpoints: StopPointCollection::new()
+            watchpoints: StopPointCollection::new(),
+            syscall_catch_policy: SyscallCatchPolicy::None,
+            expecting_syscall_exit: false
         };
         proc.wait_on_signal()?;
+        Self::set_ptrace_options(proc.pid)?;
 
         Ok(proc)
     }
@@ -263,7 +379,13 @@ impl Process {
             self.enable_breakpoint(bp_id)?;
         }
 
-        ptrace::cont(self.pid)?;
+        // trace syscalls if necessary
+        let request = match self.syscall_catch_policy {
+            SyscallCatchPolicy::None => PTRACE_CONT,
+            _ => PTRACE_SYSCALL
+        };
+
+        ptrace::request(request, self.pid)?;
         self.state = ProcessState::Running;
         Ok(())
     }
@@ -275,18 +397,121 @@ impl Process {
         if self.is_attached && stop_reason.reason.is_stopped() {
             // read all registers and get program counter for stop state
             self.read_all_registers()?;
-            let pc = self.get_pc();
+
+            let mut pc = self.get_pc();
             stop_reason.reason.set_pc(pc);
 
-            // update program counter to point to breakpoint if it's the next instruction
-            let instr_begin = pc - 1;
-            if stop_reason.info == SIGTRAP && self.breakpoint_sites().enabled_stoppoint_at_address(instr_begin) {
-                self.set_pc(instr_begin)?;
+            // see if we stopped due to a trap
+            // if so collect further info about the reason for the stop
+            if let Some(trap_type) = self.get_trap_type(&mut stop_reason)? {
+
+                // update program counter to point to breakpoint if it's the next instruction
+                let instr_begin = pc - 1;
+                if self.breakpoint_sites().enabled_stoppoint_at_address(instr_begin) {
+                    pc = instr_begin;
+                    self.set_pc(pc)?;
+                }
+
+                let trap_info = match trap_type {
+                    TrapType::SoftwareBreak => {
+                        let breakpoint = self.breakpoint_sites.get_by_address(pc)?;
+                        let breakpoint_id = breakpoint.id();
+                        TrapInfo::SoftwareBreakpoint { breakpoint_id }
+                    },
+                    TrapType::HardwareBreak => {
+                        let id = self.get_current_hardware_stoppoint();
+                        match id {
+                            StopPointId::Breakpoint(breakpoint_id) => {
+                                // at hardware breakpoint
+                                TrapInfo::HardwareBreakpoint { breakpoint_id }
+                            },
+                            StopPointId::Watchpoint(watchpoint_id) => {
+                                // re-read watched data
+                                let update = self.update_watchpoint_data(watchpoint_id)?;
+                                TrapInfo::WatchPoint(watchpoint_id, update)
+                            }
+                        }
+                    },
+                    TrapType::Syscall => {
+                        let id = self.registers.read_by_id_as(RegisterId::orig_rax);
+                        let syscall = SyscallType::from_id(id).expect(&format!("Unknown syscall id {}", id));
+
+                        if self.expecting_syscall_exit {
+                            // assume stop is due to syscall exit
+                            // syscall id is stored in orig_rax register
+                            // return value in rax
+                            let ret = self.registers.read_by_id_as(RegisterId::rax);
+                            let call_info = SyscallInfo {
+                                syscall,
+                                direction: SyscallDirection::Exit(ret)
+                            };
+
+                            self.expecting_syscall_exit = false;
+
+                            TrapInfo::Syscall(call_info)
+                        } else {
+                            // read args from registers
+                            let arg_registers = [
+                                RegisterId::rdi, RegisterId::rsi, RegisterId::rdx,
+                                RegisterId::r10, RegisterId::r8, RegisterId::r9
+                            ];
+
+                            let args = {
+                                let mut args = [0u64; 6];
+                                for (index, reg) in arg_registers.iter().enumerate() {
+                                    args[index] = self.registers.read_by_id_as(*reg);
+                                }
+                                args
+                            };
+
+                            let call_info = SyscallInfo {
+                                syscall,
+                                direction: SyscallDirection::Entry { args }
+                            };
+
+                            self.expecting_syscall_exit = true;
+                            TrapInfo::Syscall(call_info)
+                        }
+                    }
+                    TrapType::SingleStep => TrapInfo::SingleStep,
+                    TrapType::Unknown => TrapInfo::Unknown
+                };
+
+                stop_reason.trap_reason = Some(trap_info);
+
+                // if the stop was due to a syscall we only want to stop if
+                // this is required by the current stop policy
+                // otherwise resume
+                if let TrapInfo::Syscall(syscall_info) = trap_info {
+                    if self.syscall_catch_policy.should_resume(syscall_info.syscall) {
+                        self.resume()?;
+                        return self.wait_on_signal();
+                    }
+                }
             }
         }
 
         self.state = stop_reason.reason;
         Ok(stop_reason)
+    }
+
+    fn get_trap_type(&mut self, reason: &mut StopReason) -> Result<Option<TrapType>, Error> {
+        // bit 7 is set to indicate syscall
+        if reason.info == (SIGTRAP | 0x80) {
+            // (re)set signal to SIGTRAP so it's easier to check later
+            reason.info = SIGTRAP;
+            return Ok(Some(TrapType::Syscall));
+        }
+
+        self.expecting_syscall_exit = false;
+
+        if reason.info == SIGTRAP {
+            let info = ptrace::get_sig_info(self.pid)?;
+            let trap_reason = TrapType::from_code(info.si_code);
+            Ok(Some(trap_reason))
+        } else {
+            Ok(None)
+        }
     }
 
     pub fn step_instruction(&mut self) -> Result<StopReason, Error> {
@@ -311,12 +536,36 @@ impl Process {
         Ok(reason)
     }
 
+    pub fn set_syscall_catch_policy(&mut self, policy: SyscallCatchPolicy) {
+        self.syscall_catch_policy = policy;
+    }
+
     fn read_all_registers(&mut self) -> Result<(), Error> {
         self.registers.read_all()
     }
 
     pub fn write_user_area(&mut self, offset: usize, word: usize) -> Result<(), Error> {
         self.registers.write_user_area(offset, word)
+    }
+
+    pub fn get_current_hardware_stoppoint(&self) -> StopPointId {
+        let status_raw: u64 = self.registers.read_by_id_as(RegisterId::dr6);
+        let status = DebugStatusRegister::new(status_raw);
+        let index = status.active();
+        let register_id = index.register_id();
+        let addr: VirtualAddress = self.registers.read_by_id_as(register_id);
+
+        // see if the address is a hardware breakpoint
+        if self.breakpoint_sites().contains_address(addr) {
+            let site = self.breakpoint_sites.get_by_address(addr).expect("Expected to find hardware breakpoint at address");
+            StopPointId::Breakpoint(site.id())
+        } else {
+            // otherwise it *should* be a watchpoint
+            let watchpoint = self.watchpoints.get_by_address(addr).expect("Expected to find watchpoint at address");
+            StopPointId::Watchpoint(watchpoint.id())
+        }
+
+
     }
 
     pub fn pid(&self) -> pid_t {
@@ -415,10 +664,26 @@ impl Process {
         if self.watchpoints.contains_address(address) {
             Err(Error::from_message(format!("Watchpoint already created at address {}", address)))
         } else {
-            let wp = WatchPoint::new(address, mode, size);
+            let initial_data = self.read_memory(address, size)?;
+            let wp = WatchPoint::new(address, mode, size, initial_data);
             let id = wp.id();
             self.watchpoints.push(wp);
             Ok(id)
+        }
+    }
+
+    fn update_watchpoint_data(&mut self, watchpoint_id: <WatchPoint as StopPoint>::IdType) -> Result<WatchPointUpdate, Error> {
+        let data_bytes = {
+            let wp = self.watchpoints.get_by_id_mut(watchpoint_id)?;
+            let addr = wp.address();
+            let size = wp.size();
+            self.read_memory(addr, size)?
+        };
+
+        {
+            let wp = self.watchpoints.get_by_id_mut(watchpoint_id)?;
+            let update = wp.set_data(data_bytes);
+            Ok(update)
         }
     }
 
@@ -644,8 +909,9 @@ impl Drop for Process {
 #[cfg(test)]
 mod test {
     use std::io::{self, BufReader, BufRead};
-    use std::fs::File;
+    use std::fs::{File, OpenOptions};
     use std::mem;
+    use std::os::fd::AsRawFd;
     use std::path::{Path, PathBuf};
     use std::process::{Command};
     use libc::{ESRCH, Elf64_Addr, Elf64_Ehdr};
@@ -1222,6 +1488,41 @@ mod test {
         {
             let s = read_next_string(&mut channel);
             assert_eq!("Putting pineapple on pizza", s.trim(), "Unexpected message after hardware breakpoint");
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn syscall_catchpoints_test() -> Result<(), Error> {
+        let dev_null = OpenOptions::new().write(true).open("/dev/null")?;
+        let mut proc = Process::launch("target/debug/anti_debugger", true, StdoutReplacement::Fd(dev_null.as_raw_fd()))?;
+
+        let policy = SyscallCatchPolicy::Some([SyscallType::write].into_iter().collect());
+        proc.set_syscall_catch_policy(policy);
+
+        proc.resume()?;
+        let reason = proc.wait_on_signal()?;
+
+        assert!(reason.reason.is_stopped(), "Expected process to be stopped");
+        assert_eq!(reason.info, SIGTRAP, "Expected stop due to SIGTRAP");
+
+        if let Some(TrapInfo::Syscall(SyscallInfo { syscall: SyscallType::write, direction: SyscallDirection::Entry { .. } })) = reason.trap_reason {
+            // expected
+        } else {
+            panic!("Expected trap due to write syscall entry");
+        }
+
+        proc.resume()?;
+        let reason = proc.wait_on_signal()?;
+
+        assert!(reason.reason.is_stopped(), "Expected process to be stopped");
+        assert_eq!(reason.info, SIGTRAP, "Expected stop due to trap");
+
+        if let Some(TrapInfo::Syscall(SyscallInfo { syscall: SyscallType::write, direction: SyscallDirection::Exit(_)})) = reason.trap_reason {
+            // expected
+        } else {
+            panic!("Expected trap due to write syscall exit");
         }
 
         Ok(())
