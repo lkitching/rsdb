@@ -4,11 +4,13 @@ use std::{ptr, slice};
 use std::os::fd::AsRawFd;
 use std::ffi::{CStr};
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use libc::{Elf64_Ehdr, PROT_READ, MAP_SHARED, size_t, c_void, Elf64_Shdr, Elf64_Xword};
 
 use crate::error::Error;
 use crate::interop;
+use crate::types::{VirtualAddress, FileAddress};
 
 pub struct Elf {
     file: File,
@@ -17,11 +19,12 @@ pub struct Elf {
     header: Elf64_Ehdr,
     mmap_ptr: *const c_void,
     section_headers: Vec<Elf64_Shdr>,
-    section_map: HashMap<String, Elf64_Shdr>
+    section_map: HashMap<String, Elf64_Shdr>,
+    load_bias: Option<VirtualAddress>
 }
 
 impl Elf {
-    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
+    pub fn open<P: AsRef<Path>>(path: P) -> Result<Rc<Self>, Error> {
         let path: PathBuf = path.as_ref().to_path_buf();
         let file = File::open(path.as_path())?;
 
@@ -50,10 +53,19 @@ impl Elf {
             header,
             mmap_ptr,
             section_headers,
-            section_map
+            section_map,
+            load_bias: None
         };
 
-        Ok(elf)
+        Ok(Rc::new(elf))
+    }
+
+    pub fn notify_loaded(&mut self, addr: VirtualAddress) {
+        self.load_bias = Some(addr)
+    }
+
+    pub fn load_bias(&self) -> Option<VirtualAddress> {
+        self.load_bias
     }
 
     fn parse_section_headers(elf_ptr: *const u8, header: &Elf64_Ehdr) -> Vec<Elf64_Shdr> {
@@ -125,6 +137,29 @@ impl Elf {
         let section = self.get_section(".strtab").or_else(|| self.get_section(".dynstr"))?;
         let str = Self::get_section_string(self.mmap_ptr as *const u8, section, index);
         Some(str)
+    }
+
+    pub fn get_section_containing_file_address(self: &Rc<Self>, addr: &FileAddress) -> Option<&Elf64_Shdr> {
+        if Rc::ptr_eq(self, addr.elf_ptr()) {
+            self.section_headers.iter().find(|sh| {
+                let end_addr = sh.sh_addr + sh.sh_size;
+                (sh.sh_addr..end_addr).contains(&(addr.addr() as u64))
+            })
+        } else { None }
+    }
+
+    pub fn get_section_containing_virtual_address(self: &Rc<Self>, addr: VirtualAddress) -> Option<&Elf64_Shdr> {
+        let load_bias = self.load_bias?;
+        self.section_headers.iter().find(|sh| {
+            let start_addr = sh.sh_addr + (load_bias.addr() as u64);
+            let end_addr = start_addr + sh.sh_size;
+            (start_addr..end_addr).contains(&(addr.addr() as u64))
+        })
+    }
+
+    pub fn get_section_start_address(self: &Rc<Self>, name: &str) -> Option<FileAddress> {
+        let section = self.get_section(name)?;
+        Some(FileAddress::new(self.clone(), section.sh_addr as usize))
     }
 }
 
