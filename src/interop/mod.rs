@@ -4,7 +4,7 @@ use std::os::fd::RawFd;
 use std::ffi::{CString, CStr};
 use std::ptr;
 
-use libc::{self, c_char, pid_t, c_ulong, c_int, strsignal};
+use libc::{self, c_char, pid_t, c_ulong, c_int, c_void, size_t, off_t, strsignal, MAP_FAILED};
 use crate::error::Error;
 
 pub fn dup2(src_fd: RawFd, dest_fd: RawFd) -> Result<(), Error> {
@@ -70,4 +70,13 @@ pub fn setpgid(pid: pid_t, pgid: pid_t) -> Result<(), Error> {
     if unsafe { libc::setpgid(pid, pgid) } < 0 {
         Err(Error::from_errno("Could not set process group id"))
     } else { Ok(()) }
+}
+
+pub fn mmap(addr: *mut c_void, length: size_t, prot: c_int, flags: c_int, fd: RawFd, offset: off_t) -> Result<*const c_void, Error> {
+    let p = unsafe { libc::mmap(addr, length, prot, flags, fd, offset )};
+    if p == MAP_FAILED {
+        Err(Error::from_errno("mmap failed"))
+    } else {
+        Ok(p)
+    }
 }
