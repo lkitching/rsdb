@@ -1,16 +1,79 @@
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::{ptr, slice};
+use std::cmp::Ordering;
 use std::os::fd::AsRawFd;
 use std::ffi::{CStr};
-use std::collections::HashMap;
+use std::collections::{HashMap, BTreeMap};
 use std::rc::Rc;
+use std::cell::Cell;
+use std::hash::Hash;
 
-use libc::{Elf64_Ehdr, PROT_READ, MAP_SHARED, size_t, c_void, Elf64_Shdr, Elf64_Xword};
+use libc::{Elf64_Ehdr, PROT_READ, MAP_SHARED, size_t, c_void, Elf64_Shdr, Elf64_Xword, Elf64_Sym};
 
 use crate::error::Error;
 use crate::interop;
 use crate::types::{VirtualAddress, FileAddress};
+
+struct FileAddressRange {
+    start: FileAddress,
+    end: FileAddress
+}
+
+impl PartialEq for FileAddressRange {
+    fn eq(&self, other: &Self) -> bool {
+        self.start.addr() == other.start.addr()
+    }
+}
+
+impl Eq for FileAddressRange {}
+
+impl PartialOrd for FileAddressRange {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for FileAddressRange {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // NOTE: FileAddress only implements PartialOrd since comparison of addresses within
+        // different ELF files is not defined
+        // FileAddressRange instances *should* always contain addresses for the same instance
+        assert!(Rc::ptr_eq(self.start.elf_ptr(), other.start.elf_ptr()), "address range starts in different ELF files");
+        assert!(Rc::ptr_eq(self.end.elf_ptr(), other.end.elf_ptr()), "address range ends in different ELF files");
+
+        self.start.addr().cmp(&other.start.addr())
+    }
+}
+
+struct UnorderedMultiMap<K, V> {
+    items: HashMap<K, Vec<V>>,
+}
+
+impl <K, V> UnorderedMultiMap<K, V> {
+    pub fn new() -> Self {
+        Self { items: HashMap::new() }
+    }
+}
+
+impl <K: Eq + Hash, V> UnorderedMultiMap<K, V> {
+    pub fn insert(&mut self, key: K, value: V) {
+        match self.items.get_mut(&key) {
+            None => {
+                self.items.insert(key, vec![value]);
+            },
+            Some(values) => {
+                values.push(value)
+            }
+        }
+    }
+}
+
+fn elf64_st_type(info: u8) -> u8 {
+    info & 0x0F
+}
+
+const STT_TLS: u8 = 6;
 
 pub struct Elf {
     file: File,
@@ -20,7 +83,10 @@ pub struct Elf {
     mmap_ptr: *const c_void,
     section_headers: Vec<Elf64_Shdr>,
     section_map: HashMap<String, Elf64_Shdr>,
-    load_bias: Option<VirtualAddress>
+    load_bias: Option<VirtualAddress>,
+    symbol_table: Vec<Elf64_Sym>,
+    symbol_name_map: Cell<UnorderedMultiMap<String, Elf64_Sym>>,
+    symbol_address_map: Cell<BTreeMap<FileAddressRange, Elf64_Sym>>
 }
 
 impl Elf {
@@ -46,6 +112,9 @@ impl Elf {
         // build section header mapping
         let section_map = Self::build_section_map(mmap_ptr as *const u8, &header, section_headers.as_slice());
 
+        // parse symbol table
+        let symbol_table = Self::parse_symbol_table(mmap_ptr as *const u8, &section_map);
+
         let elf = Self {
             file,
             file_len,
@@ -54,10 +123,16 @@ impl Elf {
             mmap_ptr,
             section_headers,
             section_map,
+            symbol_table,
+            symbol_address_map: Cell::new(BTreeMap::new()),
+            symbol_name_map: Cell::new(UnorderedMultiMap::new()),
             load_bias: None
         };
 
-        Ok(Rc::new(elf))
+        let mut elf = Rc::new(elf);
+        elf.build_symbol_maps();
+
+        Ok(elf)
     }
 
     pub fn notify_loaded(&mut self, addr: VirtualAddress) {
@@ -88,6 +163,19 @@ impl Elf {
         headers.to_vec()
     }
 
+    fn parse_symbol_table(elf_ptr: *const u8, section_map: &HashMap<String, Elf64_Shdr>) -> Vec<Elf64_Sym> {
+        if let Some(symbol_table_section) = section_map.get(".symtab").or_else(|| section_map.get(".dynsym")) {
+            let symbol_count = symbol_table_section.sh_size / symbol_table_section.sh_entsize;
+            let symbols = unsafe {
+                let sym_ptr = elf_ptr.add(symbol_table_section.sh_offset as usize) as *const Elf64_Sym;
+                slice::from_raw_parts(sym_ptr, symbol_count as usize)
+            };
+            symbols.to_vec()
+        } else {
+            Vec::new()
+        }
+    }
+
     pub fn get_section_name(&self, index: usize) -> String {
         Self::find_section_header(self.mmap_ptr as *const u8, &self.header, self.section_headers.as_slice(), index)
     }
@@ -106,6 +194,33 @@ impl Elf {
         }
 
         map
+    }
+
+    fn build_symbol_maps(self: &mut Rc<Self>) {
+        let mut symbol_name_map = UnorderedMultiMap::new();
+        let mut symbol_address_map = BTreeMap::new();
+
+        for symbol in self.symbol_table.iter() {
+            if let Some(mangled_name) = self.get_string(symbol.st_name as usize) {
+                let demangle_result = interop::cxa_demangle(mangled_name.as_str());
+
+                // insert names
+                symbol_name_map.insert(mangled_name, symbol.clone());
+                if let Ok(demangled_name) = demangle_result {
+                    symbol_name_map.insert(demangled_name, symbol.clone());
+                }
+            }
+
+            if symbol.st_value != 0 && symbol.st_name != 0 && elf64_st_type(symbol.st_info) != STT_TLS {
+                let start = FileAddress::new(self.clone(), symbol.st_value as usize);
+                let end = FileAddress::new(self.clone(), (symbol.st_value + symbol.st_size) as usize);
+                let address_range = FileAddressRange { start, end };
+                symbol_address_map.insert(address_range, symbol.clone());
+            }
+        }
+
+        self.symbol_name_map.set(symbol_name_map);
+        self.symbol_address_map.set(symbol_address_map);
     }
 
     pub fn get_section(&self, name: &str) -> Option<&Elf64_Shdr> {
