@@ -6,15 +6,17 @@ use std::os::fd::AsRawFd;
 use std::ffi::{CStr};
 use std::collections::{HashMap, BTreeMap};
 use std::rc::Rc;
-use std::cell::Cell;
+use std::cell::OnceCell;
 use std::hash::Hash;
-
+use std::borrow::Borrow;
+use std::ops::Bound;
 use libc::{Elf64_Ehdr, PROT_READ, MAP_SHARED, size_t, c_void, Elf64_Shdr, Elf64_Xword, Elf64_Sym};
 
 use crate::error::Error;
 use crate::interop;
 use crate::types::{VirtualAddress, FileAddress};
 
+#[derive(Debug)]
 struct FileAddressRange {
     start: FileAddress,
     end: FileAddress
@@ -46,6 +48,7 @@ impl Ord for FileAddressRange {
     }
 }
 
+#[derive(Debug)]
 struct UnorderedMultiMap<K, V> {
     items: HashMap<K, Vec<V>>,
 }
@@ -53,6 +56,18 @@ struct UnorderedMultiMap<K, V> {
 impl <K, V> UnorderedMultiMap<K, V> {
     pub fn new() -> Self {
         Self { items: HashMap::new() }
+    }
+}
+
+struct ValuesIterator<I> {
+    inner: Option<I>
+}
+
+impl <I: Iterator> Iterator for ValuesIterator<I> {
+    type Item = I::Item;
+    fn next(&mut self) -> Option<Self::Item> {
+        let iter = self.inner.as_mut()?;
+        iter.next()
     }
 }
 
@@ -66,6 +81,15 @@ impl <K: Eq + Hash, V> UnorderedMultiMap<K, V> {
                 values.push(value)
             }
         }
+    }
+    
+    pub fn values_for<Q>(&self, key: &Q) -> impl Iterator<Item=&V>
+    where
+        K : Borrow<Q>,
+        Q: Hash + Eq + ?Sized
+    {
+        let inner = self.items.get(key).map(|vs| vs.iter());
+        ValuesIterator { inner }
     }
 }
 
@@ -85,8 +109,8 @@ pub struct Elf {
     section_map: HashMap<String, Elf64_Shdr>,
     load_bias: Option<VirtualAddress>,
     symbol_table: Vec<Elf64_Sym>,
-    symbol_name_map: Cell<UnorderedMultiMap<String, Elf64_Sym>>,
-    symbol_address_map: Cell<BTreeMap<FileAddressRange, Elf64_Sym>>
+    symbol_name_map: OnceCell<UnorderedMultiMap<String, Elf64_Sym>>,
+    symbol_address_map: OnceCell<BTreeMap<FileAddressRange, Elf64_Sym>>
 }
 
 impl Elf {
@@ -124,8 +148,8 @@ impl Elf {
             section_headers,
             section_map,
             symbol_table,
-            symbol_address_map: Cell::new(BTreeMap::new()),
-            symbol_name_map: Cell::new(UnorderedMultiMap::new()),
+            symbol_address_map: OnceCell::new(),
+            symbol_name_map: OnceCell::new(),
             load_bias: None
         };
 
@@ -219,8 +243,54 @@ impl Elf {
             }
         }
 
-        self.symbol_name_map.set(symbol_name_map);
-        self.symbol_address_map.set(symbol_address_map);
+        self.symbol_name_map.set(symbol_name_map).expect("Symbol name map already initialised");
+        self.symbol_address_map.set(symbol_address_map).expect("Symbol address map already initialised");
+    }
+
+    pub fn get_symbols_by_name(&self, name: &str) -> impl Iterator<Item=&Elf64_Sym> {
+        self.symbol_name_map.get().expect("Symbol name map not set").values_for(name)
+    }
+
+    pub fn get_symbol_at_file_address(self: &Rc<Self>, addr: &FileAddress) -> Option<&Elf64_Sym> {
+        if Rc::ptr_eq(self, addr.elf_ptr()) {
+            let map = self.symbol_address_map.get().expect("Symbol address map not set");
+
+            // NOTE: only the first part of the range is used for the lookup
+            // construct a range with an arbitrary end point
+            let range = FileAddressRange { start: addr.clone(), end: FileAddress::new(self.clone(), 0) };
+            map.get(&range)
+        } else { None }
+    }
+
+    pub fn get_symbol_at_virtual_address(self: &Rc<Self>, addr: VirtualAddress) -> Option<&Elf64_Sym> {
+        let file_addr = addr.to_file_address(self.clone())?;
+        self.get_symbol_at_file_address(&file_addr)
+    }
+
+    pub fn get_symbol_containing_file_address(self: &Rc<Self>, addr: &FileAddress) -> Option<&Elf64_Sym> {
+        if !Rc::ptr_eq(self, addr.elf_ptr()) {
+            return None;
+        }
+
+        let map = self.symbol_address_map.get().expect("Symbol address map not set");
+
+        // NOTE: only the first part of the range is used for the lookup
+        // construct a range with an arbitrary end point
+        let range = FileAddressRange { start: addr.clone(), end: FileAddress::new(self.clone(), 0) };
+
+        // find first symbol with an address less than or equal to addr
+        let cursor = map.upper_bound(Bound::Included(&range));
+        let (key, value) = cursor.peek_prev()?;
+
+        // check addr is in range
+        if addr.addr() >= key.start.addr() && addr.addr() < key.end.addr() {
+            Some(value)
+        } else { None }
+    }
+
+    pub fn get_symbol_containing_virtual_address(self: &Rc<Self>, addr: VirtualAddress) -> Option<&Elf64_Sym> {
+        let file_addr = addr.to_file_address(self.clone())?;
+        self.get_symbol_containing_file_address(&file_addr)
     }
 
     pub fn get_section(&self, name: &str) -> Option<&Elf64_Shdr> {

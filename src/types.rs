@@ -4,6 +4,7 @@ use std::num::ParseIntError;
 use std::ops::{Add, Sub, AddAssign, SubAssign};
 use std::str::{FromStr};
 use std::rc::Rc;
+use std::ffi::c_void;
 
 use crate::elf::Elf;
 
@@ -634,6 +635,12 @@ impl FromStr for StoppointMode {
 pub struct FileAddress {
     elf: Rc<Elf>,
     addr: usize
+}
+
+impl fmt::Debug for FileAddress {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "FileAddress {{ elf: {:p}, addr: {:p} }}", Rc::as_ptr(&self.elf), self.addr as *const c_void)
+    }
 }
 
 impl FileAddress {
