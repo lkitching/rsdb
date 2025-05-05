@@ -1,7 +1,6 @@
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::{ptr, slice};
-use std::cmp::Ordering;
 use std::os::fd::AsRawFd;
 use std::ffi::{CStr};
 use std::collections::{HashMap, BTreeMap};
@@ -15,38 +14,6 @@ use libc::{Elf64_Ehdr, PROT_READ, MAP_SHARED, size_t, c_void, Elf64_Shdr, Elf64_
 use crate::error::Error;
 use crate::interop;
 use crate::types::{VirtualAddress, FileAddress};
-
-#[derive(Debug)]
-struct FileAddressRange {
-    start: FileAddress,
-    end: FileAddress
-}
-
-impl PartialEq for FileAddressRange {
-    fn eq(&self, other: &Self) -> bool {
-        self.start.addr() == other.start.addr()
-    }
-}
-
-impl Eq for FileAddressRange {}
-
-impl PartialOrd for FileAddressRange {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for FileAddressRange {
-    fn cmp(&self, other: &Self) -> Ordering {
-        // NOTE: FileAddress only implements PartialOrd since comparison of addresses within
-        // different ELF files is not defined
-        // FileAddressRange instances *should* always contain addresses for the same instance
-        assert!(Rc::ptr_eq(self.start.elf_ptr(), other.start.elf_ptr()), "address range starts in different ELF files");
-        assert!(Rc::ptr_eq(self.end.elf_ptr(), other.end.elf_ptr()), "address range ends in different ELF files");
-
-        self.start.addr().cmp(&other.start.addr())
-    }
-}
 
 #[derive(Debug)]
 struct UnorderedMultiMap<K, V> {
@@ -110,7 +77,7 @@ pub struct Elf {
     load_bias: Option<VirtualAddress>,
     symbol_table: Vec<Elf64_Sym>,
     symbol_name_map: OnceCell<UnorderedMultiMap<String, Elf64_Sym>>,
-    symbol_address_map: OnceCell<BTreeMap<FileAddressRange, Elf64_Sym>>
+    symbol_address_map: OnceCell<BTreeMap<usize, Elf64_Sym>>
 }
 
 impl Elf {
@@ -236,10 +203,8 @@ impl Elf {
             }
 
             if symbol.st_value != 0 && symbol.st_name != 0 && elf64_st_type(symbol.st_info) != STT_TLS {
-                let start = FileAddress::new(self.clone(), symbol.st_value as usize);
-                let end = FileAddress::new(self.clone(), (symbol.st_value + symbol.st_size) as usize);
-                let address_range = FileAddressRange { start, end };
-                symbol_address_map.insert(address_range, symbol.clone());
+                let start = symbol.st_value as usize;
+                symbol_address_map.insert(start, symbol.clone());
             }
         }
 
@@ -251,20 +216,35 @@ impl Elf {
         self.symbol_name_map.get().expect("Symbol name map not set").values_for(name)
     }
 
+    fn get_symbol_at_addr(self: &Rc<Self>, addr: usize) -> Option<&Elf64_Sym> {
+        let map = self.symbol_address_map.get().expect("Symbol address map not set");
+        map.get(&addr)
+    }
+
     pub fn get_symbol_at_file_address(self: &Rc<Self>, addr: &FileAddress) -> Option<&Elf64_Sym> {
         if Rc::ptr_eq(self, addr.elf_ptr()) {
-            let map = self.symbol_address_map.get().expect("Symbol address map not set");
-
-            // NOTE: only the first part of the range is used for the lookup
-            // construct a range with an arbitrary end point
-            let range = FileAddressRange { start: addr.clone(), end: FileAddress::new(self.clone(), 0) };
-            map.get(&range)
+            self.get_symbol_at_addr(addr.addr())
         } else { None }
     }
 
     pub fn get_symbol_at_virtual_address(self: &Rc<Self>, addr: VirtualAddress) -> Option<&Elf64_Sym> {
-        let file_addr = addr.to_file_address(self.clone())?;
-        self.get_symbol_at_file_address(&file_addr)
+        self.get_symbol_at_addr(addr.addr())
+    }
+
+    fn get_symbol_containing_addr(&self, addr: usize) -> Option<&Elf64_Sym> {
+        let map = self.symbol_address_map.get().expect("Symbol address map not set");
+
+        // find first symbol with an address less than or equal to addr
+        let cursor = map.upper_bound(Bound::Included(&addr));
+        let (key, value) = cursor.peek_prev()?;
+
+        let start = *key;
+        let end = start + value.st_size as usize;
+
+        // check addr is within symbol range
+        if (start..end).contains(&addr) {
+            Some(value)
+        } else { None }
     }
 
     pub fn get_symbol_containing_file_address(self: &Rc<Self>, addr: &FileAddress) -> Option<&Elf64_Sym> {
@@ -272,20 +252,7 @@ impl Elf {
             return None;
         }
 
-        let map = self.symbol_address_map.get().expect("Symbol address map not set");
-
-        // NOTE: only the first part of the range is used for the lookup
-        // construct a range with an arbitrary end point
-        let range = FileAddressRange { start: addr.clone(), end: FileAddress::new(self.clone(), 0) };
-
-        // find first symbol with an address less than or equal to addr
-        let cursor = map.upper_bound(Bound::Included(&range));
-        let (key, value) = cursor.peek_prev()?;
-
-        // check addr is in range
-        if addr.addr() >= key.start.addr() && addr.addr() < key.end.addr() {
-            Some(value)
-        } else { None }
+        self.get_symbol_containing_addr(addr.addr())
     }
 
     pub fn get_symbol_containing_virtual_address(self: &Rc<Self>, addr: VirtualAddress) -> Option<&Elf64_Sym> {
