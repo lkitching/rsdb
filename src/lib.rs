@@ -14,3 +14,4 @@ pub mod stoppoint_collection;
 pub mod disassembler;
 pub mod syscalls;
 pub mod elf;
+pub mod multimap;

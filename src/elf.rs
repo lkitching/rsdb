@@ -6,59 +6,13 @@ use std::ffi::{CStr};
 use std::collections::{HashMap, BTreeMap};
 use std::rc::Rc;
 use std::cell::OnceCell;
-use std::hash::Hash;
-use std::borrow::Borrow;
 use std::ops::Bound;
 use libc::{Elf64_Ehdr, PROT_READ, MAP_SHARED, size_t, c_void, Elf64_Shdr, Elf64_Xword, Elf64_Sym};
 
 use crate::error::Error;
 use crate::interop;
 use crate::types::{VirtualAddress, FileAddress};
-
-#[derive(Debug)]
-struct UnorderedMultiMap<K, V> {
-    items: HashMap<K, Vec<V>>,
-}
-
-impl <K, V> UnorderedMultiMap<K, V> {
-    pub fn new() -> Self {
-        Self { items: HashMap::new() }
-    }
-}
-
-struct ValuesIterator<I> {
-    inner: Option<I>
-}
-
-impl <I: Iterator> Iterator for ValuesIterator<I> {
-    type Item = I::Item;
-    fn next(&mut self) -> Option<Self::Item> {
-        let iter = self.inner.as_mut()?;
-        iter.next()
-    }
-}
-
-impl <K: Eq + Hash, V> UnorderedMultiMap<K, V> {
-    pub fn insert(&mut self, key: K, value: V) {
-        match self.items.get_mut(&key) {
-            None => {
-                self.items.insert(key, vec![value]);
-            },
-            Some(values) => {
-                values.push(value)
-            }
-        }
-    }
-    
-    pub fn values_for<Q>(&self, key: &Q) -> impl Iterator<Item=&V>
-    where
-        K : Borrow<Q>,
-        Q: Hash + Eq + ?Sized
-    {
-        let inner = self.items.get(key).map(|vs| vs.iter());
-        ValuesIterator { inner }
-    }
-}
+use crate::multimap::{UnorderedMultiMap};
 
 fn elf64_st_type(info: u8) -> u8 {
     info & 0x0F
