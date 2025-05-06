@@ -492,7 +492,7 @@ impl VirtualAddress {
 
     pub fn to_file_address(&self, elf: Rc<Elf>) -> Option<FileAddress> {
         let _section = elf.get_section_containing_virtual_address(*self)?;
-        let load_bias = elf.load_bias().expect("ELF file not loaded");
+        let load_bias = elf.load_bias();
         let file_addr = self.addr - load_bias.addr();
         Some(FileAddress::new(elf, file_addr))
     }
@@ -654,7 +654,7 @@ impl FileAddress {
 
     pub fn to_virtual_address(&self) -> Option<VirtualAddress> {
         let _section = self.elf.get_section_containing_file_address(self)?;
-        let load_bias = self.elf.load_bias().expect("ELF file not loaded");
+        let load_bias = self.elf.load_bias();
 
         let va = VirtualAddress::new(self.addr + load_bias.addr());
         Some(va)

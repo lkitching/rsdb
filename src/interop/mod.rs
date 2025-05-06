@@ -81,7 +81,7 @@ pub fn mmap(addr: *mut c_void, length: size_t, prot: c_int, flags: c_int, fd: Ra
     }
 }
 
-#[link(name = "iberty")]
+#[link(name = "stdc++")]
 extern "C" {
     fn __cxa_demangle(mangled_name: *const c_char, output_buffer: *mut c_char, length: *mut size_t, status: *mut c_int) -> *mut c_char;
 }

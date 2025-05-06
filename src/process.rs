@@ -3,12 +3,14 @@ use std::str::{FromStr};
 use std::ptr;
 use std::fmt::{self, Formatter};
 use std::num::ParseIntError;
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::os::fd::{RawFd};
-use std::collections::HashSet;
+use std::collections::{HashSet, HashMap};
+use std::path::Path;
+use std::fs::File;
 
 use libc::{pid_t, WIFEXITED, WIFSIGNALED, SIGKILL, STDOUT_FILENO, ADDR_NO_RANDOMIZE, SIGTRAP, process_vm_readv, PTRACE_O_TRACESYSGOOD, PTRACE_SYSCALL, PTRACE_CONT};
-use libc::{c_int, waitpid, kill, SIGSTOP, SIGCONT, WEXITSTATUS, WTERMSIG, WIFSTOPPED, WSTOPSIG, iovec, c_void, c_ulong};
+use libc::{c_int, waitpid, kill, SIGSTOP, SIGCONT, WEXITSTATUS, WTERMSIG, WIFSTOPPED, WSTOPSIG, iovec, c_void, c_ulong, AT_NULL};
 
 use crate::error::{Error};
 use crate::interop;
@@ -108,6 +110,12 @@ pub struct StopReason {
 
 #[derive(Copy, Clone, Debug)]
 pub struct PID(pid_t);
+
+impl fmt::Display for PID {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
 
 #[derive(Debug)]
 pub enum PIDParseError {
@@ -866,6 +874,27 @@ impl Process {
         }
 
         Ok(())
+    }
+
+    pub fn get_auxiliary_vector(&self) -> Result<HashMap<u64, u64>, Error> {
+        let path_str = format!("/proc/{}/auxv", self.pid);
+        let path = Path::new(path_str.as_str());
+        let mut f = File::open(path)?;
+        let mut map = HashMap::new();
+
+        fn read_u64<R: Read>(r: &mut R) -> io::Result<u64> {
+            let mut buf = [0u8; 8];
+            r.read_exact(buf.as_mut_slice())?;
+            Ok(u64::from_le_bytes(buf))
+        }
+
+        let mut key = read_u64(&mut f)?;
+        while key != AT_NULL {
+            let value = read_u64(&mut f)?;
+            map.insert(key, value);
+        }
+
+        Ok(map)
     }
 }
 

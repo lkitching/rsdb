@@ -2,13 +2,18 @@ mod command;
 
 use std::fmt;
 use std::str::FromStr;
+use std::path::Path;
+use std::rc::Rc;
 
 use rustyline;
+use libc::{AT_ENTRY};
 
 use librsdb::error::{Error};
 use librsdb::process::{Process, PID, PIDParseError, StdoutReplacement};
 use command::{CommandParseError, CommandType};
 use command::{HelpCommandHandler};
+use librsdb::elf::Elf;
+use librsdb::types::VirtualAddress;
 
 #[derive(Debug)]
 pub enum DebuggerError {
@@ -56,17 +61,17 @@ impl From<CommandParseError> for DebuggerError {
     }
 }
 
-fn attach(args: &[String]) -> Result<Process, DebuggerError> {
-    if args.len() == 3 && args[1].as_str() == "-p" {
-        // passing PID
-        let pid = args[2].parse::<PID>()?;
-        let proc = Process::attach(pid)?;
-        Ok(proc)
-    } else {
-        let program_path = args[1].as_str();
-        let proc = Process::launch(program_path, true, StdoutReplacement::None)?;
-        println!("Launched process with PID {}", proc.pid());
-        Ok(proc)
+fn create_loaded_elf(proc: &Process, path: &Path) -> Result<Rc<Elf>, Error> {
+    let auxv = proc.get_auxiliary_vector()?;
+    let elf = Elf::open(path)?;
+
+    match auxv.get(&AT_ENTRY) {
+        Some(entry_point) => {
+            let load_bias = entry_point - elf.header().e_entry;
+            elf.notify_loaded(VirtualAddress::new(load_bias as usize));
+            Ok(elf)
+        },
+        None => Err(Error::from_message(String::from("Could not find entry point in process auxiliary vector")))
     }
 }
 
@@ -82,16 +87,24 @@ fn parse_command_type(line: &str) -> Result<(CommandType, Vec<&str>), CommandPar
 
 pub struct Debugger {
     proc: Process,
+    elf: Rc<Elf>
 }
 
 impl Debugger {
-    pub fn launch(args: &[String]) -> Result<Self, DebuggerError> {
-        if args.len() == 1 {
-            Err(DebuggerError::UsageError)
-        } else {
-            let proc = attach(args)?;
-            Ok(Self { proc })
-        }
+    pub fn attach(pid: PID) -> Result<Self, DebuggerError> {
+        let proc = Process::attach(pid)?;
+
+        // /proc/{pid}/exe is a symlink to the loaded executable
+        let elf_path_str = format!("/proc/{}/exe", pid);
+        let elf_path = Path::new(elf_path_str.as_str());
+        let elf = create_loaded_elf(&proc, elf_path)?;
+        Ok(Self { proc, elf })
+    }
+
+    pub fn launch(path: &str, debug: bool, stdout_replacement: StdoutReplacement) -> Result<Self, DebuggerError> {
+        let proc = Process::launch(path, debug, stdout_replacement)?;
+        let elf = create_loaded_elf(&proc, Path::new(path))?;
+        Ok(Self { proc, elf })
     }
 
     pub fn process(&self) -> &Process { &self.proc }

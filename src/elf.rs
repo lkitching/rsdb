@@ -28,7 +28,7 @@ pub struct Elf {
     mmap_ptr: *const c_void,
     section_headers: Vec<Elf64_Shdr>,
     section_map: HashMap<String, Elf64_Shdr>,
-    load_bias: Option<VirtualAddress>,
+    load_bias: OnceCell<VirtualAddress>,
     symbol_table: Vec<Elf64_Sym>,
     symbol_name_map: OnceCell<UnorderedMultiMap<String, Elf64_Sym>>,
     symbol_address_map: OnceCell<BTreeMap<usize, Elf64_Sym>>
@@ -60,7 +60,7 @@ impl Elf {
         // parse symbol table
         let symbol_table = Self::parse_symbol_table(mmap_ptr as *const u8, &section_map);
 
-        let elf = Self {
+        let mut elf = Self {
             file,
             file_len,
             path,
@@ -71,21 +71,24 @@ impl Elf {
             symbol_table,
             symbol_address_map: OnceCell::new(),
             symbol_name_map: OnceCell::new(),
-            load_bias: None
+            load_bias: OnceCell::new()
         };
 
-        let mut elf = Rc::new(elf);
         elf.build_symbol_maps();
 
-        Ok(elf)
+        Ok(Rc::new(elf))
     }
 
-    pub fn notify_loaded(&mut self, addr: VirtualAddress) {
-        self.load_bias = Some(addr)
+    pub fn header(&self) -> &Elf64_Ehdr {
+        &self.header
     }
 
-    pub fn load_bias(&self) -> Option<VirtualAddress> {
-        self.load_bias
+    pub fn notify_loaded(self: &Rc<Self>, load_bias: VirtualAddress) {
+        self.load_bias.set(load_bias).expect("Already notified");
+    }
+
+    pub fn load_bias(&self) -> VirtualAddress {
+        *self.load_bias.get().expect("Not loaded")
     }
 
     fn parse_section_headers(elf_ptr: *const u8, header: &Elf64_Ehdr) -> Vec<Elf64_Shdr> {
@@ -141,7 +144,7 @@ impl Elf {
         map
     }
 
-    fn build_symbol_maps(self: &mut Rc<Self>) {
+    fn build_symbol_maps(&mut self) {
         let mut symbol_name_map = UnorderedMultiMap::new();
         let mut symbol_address_map = BTreeMap::new();
 
@@ -170,7 +173,7 @@ impl Elf {
         self.symbol_name_map.get().expect("Symbol name map not set").values_for(name)
     }
 
-    fn get_symbol_at_addr(self: &Rc<Self>, addr: usize) -> Option<&Elf64_Sym> {
+    fn get_symbol_at_addr(&self, addr: usize) -> Option<&Elf64_Sym> {
         let map = self.symbol_address_map.get().expect("Symbol address map not set");
         map.get(&addr)
     }
@@ -181,7 +184,7 @@ impl Elf {
         } else { None }
     }
 
-    pub fn get_symbol_at_virtual_address(self: &Rc<Self>, addr: VirtualAddress) -> Option<&Elf64_Sym> {
+    pub fn get_symbol_at_virtual_address(&self, addr: VirtualAddress) -> Option<&Elf64_Sym> {
         self.get_symbol_at_addr(addr.addr())
     }
 
@@ -254,8 +257,8 @@ impl Elf {
         } else { None }
     }
 
-    pub fn get_section_containing_virtual_address(self: &Rc<Self>, addr: VirtualAddress) -> Option<&Elf64_Shdr> {
-        let load_bias = self.load_bias?;
+    pub fn get_section_containing_virtual_address(&self, addr: VirtualAddress) -> Option<&Elf64_Shdr> {
+        let load_bias = self.load_bias();
         self.section_headers.iter().find(|sh| {
             let start_addr = sh.sh_addr + (load_bias.addr() as u64);
             let end_addr = start_addr + sh.sh_size;
