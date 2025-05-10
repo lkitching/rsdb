@@ -6,7 +6,7 @@ impl Command for StepCommandHandler {
     fn exec(&self, _args: &[&str], debugger: &mut Debugger) -> Result<(), DebuggerError> {
         let process = debugger.process_mut();
         let reason = process.step_instruction()?;
-        handle_stop(process, &reason)?;
+        handle_stop(debugger, &reason)?;
         Ok(())
     }
 

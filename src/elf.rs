@@ -14,11 +14,13 @@ use crate::interop;
 use crate::types::{VirtualAddress, FileAddress};
 use crate::multimap::{UnorderedMultiMap};
 
-fn elf64_st_type(info: u8) -> u8 {
+// see https://refspecs.linuxbase.org/elf/gabi4+/ch4.symtab.html
+pub fn elf64_st_type(info: u8) -> u8 {
     info & 0x0F
 }
 
-const STT_TLS: u8 = 6;
+pub const STT_TLS: u8 = 6;
+pub const STT_FUNC: u8 = 2;
 
 pub struct Elf {
     file: File,

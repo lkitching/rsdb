@@ -107,6 +107,8 @@ impl Debugger {
         Ok(Self { proc, elf })
     }
 
+    pub fn elf(&self) -> &Rc<Elf> { &self.elf }
+
     pub fn process(&self) -> &Process { &self.proc }
 
     pub fn process_mut(&mut self) -> &mut Process { &mut self.proc }

@@ -9,7 +9,7 @@ impl Command for ContinueCommandHandler {
 
         process.resume()?;
         let reason = process.wait_on_signal()?;
-        handle_stop(process, &reason)?;
+        handle_stop(debugger, &reason)?;
         Ok(())
     }
 

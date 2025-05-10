@@ -92,7 +92,7 @@ impl TrapType {
 }
 
 #[derive(Copy, Clone, Debug)]
-enum TrapInfo {
+pub enum TrapInfo {
     SoftwareBreakpoint { breakpoint_id: <BreakpointSite as StopPoint>::IdType },
     HardwareBreakpoint { breakpoint_id: <BreakpointSite as StopPoint>::IdType },
     WatchPoint(<WatchPoint as StopPoint>::IdType, WatchPointUpdate),
@@ -101,11 +101,39 @@ enum TrapInfo {
     Unknown
 }
 
+impl fmt::Display for TrapInfo {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unknown => Ok(()),
+            Self::SingleStep => write!(f, "(single step)"),
+            Self::SoftwareBreakpoint { breakpoint_id } => write!(f, "(breakpoint {})", breakpoint_id),
+            Self::HardwareBreakpoint { breakpoint_id } => write!(f, "(breakpoint {})", breakpoint_id),
+            Self::WatchPoint(watchpoint_id, update) => {
+                match update {
+                    WatchPointUpdate::Unchanged(value) => write!(f, "(watchpoint {})\nValue: {:#018x}", watchpoint_id, value),
+                    WatchPointUpdate::Updated { old_value, new_value } => write!(f, "(watchpoint {})\nOld Value: {:#018x}\nNew Value: {:#018x}", watchpoint_id, old_value, new_value)
+                }
+            },
+            Self::Syscall(syscall_info) => {
+                match syscall_info.direction {
+                    SyscallDirection::Entry { args } => {
+                        let arg_strs: Vec<String> = args.iter().map(|arg| format!("{:#0x}", arg)).collect();
+                        write!(f, "(syscall entry)\nsyscall: {:?}({})", syscall_info.syscall, arg_strs.join(", "))
+                    },
+                    SyscallDirection::Exit(ret) => {
+                        write!(f, "(syscall exit)\nsyscall returned {:#x}", ret)
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug)]
 pub struct StopReason {
     pub reason: ProcessState,
     pub info: c_int,
-    trap_reason: Option<TrapInfo>
+    pub trap_reason: Option<TrapInfo>
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -158,55 +186,6 @@ impl StopReason {
             }
         } else {
             panic!("Unknown status for process");
-        }
-    }
-}
-
-fn signal_description(signal: c_int) -> String {
-    interop::str_signal(signal)
-}
-
-impl fmt::Display for StopReason {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self.reason {
-            ProcessState::Running => {
-                write!(f, "running")
-            },
-            ProcessState::Exited => {
-                write!(f, "exited with status {}", self.info)
-            },
-            ProcessState::Terminated => {
-                write!(f, "terminated with signal {}", signal_description(self.info))
-            },
-            ProcessState::Stopped(addr_opt) => {
-                let trap_message = match self.trap_reason {
-                    None | Some(TrapInfo::Unknown) => String::new(),
-                    Some(TrapInfo::SingleStep) => String::from(" (single step)"),
-                    Some(TrapInfo::SoftwareBreakpoint { breakpoint_id }) => format!(" (breakpoint {})", breakpoint_id),
-                    Some(TrapInfo::HardwareBreakpoint { breakpoint_id }) => format!(" (breakpoint {})", breakpoint_id),
-                    Some(TrapInfo::WatchPoint(watchpoint_id, update)) => {
-                        match update {
-                            WatchPointUpdate::Unchanged(value) => format!(" (watchpoint {})\nValue: {:#018x}", watchpoint_id, value),
-                            WatchPointUpdate::Updated { old_value, new_value } => format!(" (watchpoint {})\nOld Value: {:#018x}\nNew Value: {:#018x}", watchpoint_id, old_value, new_value)
-                        }
-                    },
-                    Some(TrapInfo::Syscall(syscall_info)) => {
-                        match syscall_info.direction {
-                            SyscallDirection::Entry { args } => {
-                                let arg_strs: Vec<String> = args.iter().map(|arg| format!("{:#0x}", arg)).collect();
-                                format!(" (syscall entry)\nsyscall: {:?}({})", syscall_info.syscall, arg_strs.join(", "))
-                            },
-                            SyscallDirection::Exit(ret) => {
-                                format!(" (syscall exit)\nsyscall returned {:#x}", ret)
-                            }
-                        }
-                    }
-                };
-                match addr_opt {
-                    None => write!(f, "stopped with signal {}{}", signal_description(self.info), trap_message),
-                    Some(addr) => write!(f, "stopped with signal {} at {}{}", signal_description(self.info), addr, trap_message)
-                }
-            }
         }
     }
 }
