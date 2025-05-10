@@ -1,4 +1,5 @@
 #![feature(f128)]
+#![feature(btree_cursors)]
 
 pub mod process;
 pub mod error;
@@ -12,3 +13,5 @@ pub mod watchpoint;
 pub mod stoppoint_collection;
 pub mod disassembler;
 pub mod syscalls;
+pub mod elf;
+pub mod multimap;

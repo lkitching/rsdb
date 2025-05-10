@@ -11,10 +11,13 @@ mod catchpoint;
 use std::fmt::{self, Formatter};
 use std::str::FromStr;
 
+use libc::c_int;
+
 use super::{Debugger, DebuggerError};
 use librsdb::error::{Error};
-use librsdb::process::{Process, StopReason};
+use librsdb::process::{ProcessState, StopReason, TrapInfo};
 use librsdb::disassembler::print_disassembly;
+use librsdb::{interop, elf};
 
 use cont::ContinueCommandHandler;
 use register::RegisterCommandHandler;
@@ -125,13 +128,109 @@ impl CommandParseError {
     }
 }
 
-fn print_stop_reason(process: &Process, reason: &StopReason) {
-    println!("Process {} {}", process.pid(), reason)
+enum StopInfo {
+    Unknown(Option<TrapInfo>),
+    At(VirtualAddress, Option<String>, Option<TrapInfo>)
 }
 
-fn handle_stop(process: &Process, reason: &StopReason) -> Result<(), Error> {
-    print_stop_reason(process, reason);
+enum TargetStopReason {
+    Stopped(Signal, StopInfo),
+    Running,
+    Exited(c_int),
+    Terminated(Signal)
+}
+
+// TODO: move this?
+#[derive(Copy, Clone, Debug)]
+struct Signal(c_int);
+
+impl fmt::Display for Signal {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", interop::str_signal(self.0))
+    }
+}
+
+impl fmt::Display for TargetStopReason {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Running => {
+                write!(f, "running")
+            },
+            Self::Exited(status) => {
+                write!(f, "exited with status {}", status)
+            },
+            Self::Terminated(signal) => {
+                write!(f, "terminated with signal {}", signal)
+            },
+            Self::Stopped(signal, stop_info) => {
+                match stop_info {
+                    StopInfo::Unknown(None) => {
+                        write!(f, "stopped with signal {}", signal)
+                    },
+                    StopInfo::Unknown(Some(trap_info)) => {
+                        write!(f, "stopped with signal {}{}", signal, trap_info)
+                    }
+                    StopInfo::At(pc, None, None) => {
+                        write!(f, "stopped with signal {} at {}", signal, pc)
+                    },
+                    StopInfo::At(pc, None, Some(trap_info)) => {
+                        write!(f, "stopped with signal {} at {} {}", signal, pc, trap_info)
+                    },
+                    StopInfo::At(pc, Some(func_name), None) => {
+                        write!(f, "stopped with signal {} at {} ({})", signal, pc, func_name)
+                    }
+                    StopInfo::At(pc, Some(func_name), Some(trap_info)) => {
+                        write!(f, "stopped with signal {} at {} ({}) {}", signal, pc, func_name, trap_info)
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn get_target_stop_reason(debugger: &Debugger, reason: &StopReason) -> TargetStopReason {
+    match reason.reason {
+        ProcessState::Exited => TargetStopReason::Exited(reason.info),
+        ProcessState::Running => TargetStopReason::Running,
+        ProcessState::Terminated => TargetStopReason::Terminated(Signal(reason.info)),
+        ProcessState::Stopped(stopped_at) => {
+            let trap_info = reason.trap_reason;
+            let signal = Signal(reason.info);
+
+            let stop_info = match stopped_at {
+                None => StopInfo::Unknown(trap_info),
+                Some(pc) => {
+                    // if process stopped due to a signal, find the symbol corresponding
+                    // to the current PC
+                    let func_name = match debugger.elf().get_symbol_containing_virtual_address(pc) {
+                        None => None,
+                        Some(func_sym) => {
+                            if elf::elf64_st_type(func_sym.st_info) == elf::STT_FUNC {
+                                debugger.elf().get_string(func_sym.st_name as usize)
+                            } else { None }
+                        }
+                    };
+
+                    StopInfo::At(pc, func_name, trap_info)
+                }
+            };
+            TargetStopReason::Stopped(signal, stop_info)
+        }
+    }
+}
+
+fn print_stop_reason(debugger: &Debugger, reason: &StopReason) {
+    let target_stop_reason = get_target_stop_reason(debugger, reason);
+    let process = debugger.process();
+
+    println!("Process {} {}", process.pid(), target_stop_reason)
+}
+
+fn handle_stop(debugger: &Debugger, reason: &StopReason) -> Result<(), Error> {
+    print_stop_reason(debugger, reason);
+
     if reason.reason.is_stopped() {
+        let process = debugger.process();
         print_disassembly(process, process.get_pc(), 5)
     } else {
         Ok(())

@@ -1,7 +1,12 @@
+use std::cmp::Ordering;
 use std::fmt::{self, Formatter};
 use std::num::ParseIntError;
 use std::ops::{Add, Sub, AddAssign, SubAssign};
 use std::str::{FromStr};
+use std::rc::Rc;
+use std::ffi::c_void;
+
+use crate::elf::Elf;
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct Byte64 {
@@ -484,6 +489,13 @@ impl VirtualAddress {
         let addr = usize::from_le_bytes(bytes);
         Self::new(addr)
     }
+
+    pub fn to_file_address(&self, elf: Rc<Elf>) -> Option<FileAddress> {
+        let _section = elf.get_section_containing_virtual_address(*self)?;
+        let load_bias = elf.load_bias();
+        let file_addr = self.addr - load_bias.addr();
+        Some(FileAddress::new(elf, file_addr))
+    }
 }
 
 impl From<usize> for VirtualAddress {
@@ -616,6 +628,121 @@ impl FromStr for StoppointMode {
             "execute" => Ok(Self::Execute),
             _ => Err(())
         }
+    }
+}
+
+#[derive(Clone)]
+pub struct FileAddress {
+    elf: Rc<Elf>,
+    addr: usize
+}
+
+impl fmt::Debug for FileAddress {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "FileAddress {{ elf: {:p}, addr: {:p} }}", Rc::as_ptr(&self.elf), self.addr as *const c_void)
+    }
+}
+
+impl FileAddress {
+    pub fn new(elf: Rc<Elf>, addr: usize) -> Self {
+        Self { elf, addr }
+    }
+
+    pub fn addr(&self) -> usize {
+        self.addr
+    }
+
+    pub fn to_virtual_address(&self) -> Option<VirtualAddress> {
+        let _section = self.elf.get_section_containing_file_address(self)?;
+        let load_bias = self.elf.load_bias();
+
+        let va = VirtualAddress::new(self.addr + load_bias.addr());
+        Some(va)
+    }
+
+    pub fn elf_file(&self) -> &Elf {
+        self.elf.as_ref()
+    }
+
+    pub fn elf_ptr(&self) -> &Rc<Elf> {
+        &self.elf
+    }
+}
+
+impl Add<isize> for FileAddress {
+    type Output = Self;
+    fn add(self, rhs: isize) -> Self::Output {
+        if rhs >= 0 {
+            Self::new(self.elf, self.addr + rhs as usize)
+        } else {
+            Self::new(self.elf, self.addr - (rhs.abs() as usize))
+        }
+    }
+}
+
+impl Sub<isize> for FileAddress {
+    type Output = Self;
+    fn sub(self, rhs: isize) -> Self::Output {
+        if rhs >= 0 {
+            Self::new(self.elf, self.addr - (rhs as usize))
+        } else {
+            Self::new(self.elf, self.addr + (rhs.abs() as usize))
+        }
+    }
+}
+
+impl AddAssign<isize> for FileAddress {
+    fn add_assign(&mut self, rhs: isize) {
+        if rhs >= 0 {
+            self.addr += rhs as usize
+        } else {
+            self.addr -= rhs.abs() as usize
+        }
+    }
+}
+
+impl SubAssign<isize> for FileAddress {
+    fn sub_assign(&mut self, rhs: isize) {
+        if rhs >= 0 {
+            self.addr -= rhs as usize
+        } else {
+            self.addr += rhs.abs() as usize
+        }
+    }
+}
+
+impl PartialEq for FileAddress {
+    fn eq(&self, other: &Self) -> bool {
+        self.addr == other.addr && Rc::ptr_eq(&self.elf, &other.elf)
+    }
+}
+
+impl Eq for FileAddress {}
+
+impl PartialOrd for FileAddress {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        if Rc::ptr_eq(&self.elf, &other.elf) {
+            Some(self.addr.cmp(&other.addr))
+        } else { None }
+    }
+}
+
+pub struct FileOffset {
+    elf: Rc<Elf>,
+    offset: usize
+}
+
+impl FileOffset {
+    pub fn new(elf: Rc<Elf>, offset: usize) -> Self {
+        Self { elf, offset }
+    }
+
+    pub fn offset(&self) -> usize {
+        self.offset
+    }
+
+    pub fn elf_file(&self) -> &Elf {
+        self.elf.as_ref()
     }
 }
 
