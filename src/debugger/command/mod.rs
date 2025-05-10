@@ -15,7 +15,7 @@ use libc::c_int;
 
 use super::{Debugger, DebuggerError};
 use librsdb::error::{Error};
-use librsdb::process::{Process, ProcessState, StopReason, TrapInfo};
+use librsdb::process::{ProcessState, StopReason, TrapInfo};
 use librsdb::disassembler::print_disassembly;
 use librsdb::{interop, elf};
 
@@ -148,10 +148,6 @@ impl fmt::Display for Signal {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{}", interop::str_signal(self.0))
     }
-}
-
-fn signal_description(signal: c_int) -> String {
-    interop::str_signal(signal)
 }
 
 impl fmt::Display for TargetStopReason {

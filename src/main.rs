@@ -19,25 +19,28 @@ fn handle_sigint(_signum: c_int) {
 }
 
 fn attach(args: &[String]) -> Result<Debugger, DebuggerError> {
-    if args.len() == 3 && args[1].as_str() == "-p" {
-        // passing PID
-        let pid = args[2].parse::<process::PID>()?;
-        //let proc = Process::attach(pid)?;
-        let debugger = Debugger::attach(pid)?;
-        Ok(debugger)
-    } else {
-        let program_path = args[1].as_str();
-        //let proc = Process::launch(program_path, true, StdoutReplacement::None)?;
-        let debugger = Debugger::launch(program_path, true, StdoutReplacement::None)?;
-        println!("Launched process with PID {}", debugger.process().pid());
-        Ok(debugger)
+    match args.len() {
+        0 => Err(DebuggerError::UsageError),
+        2 if args[0] == "-p" => {
+            // passing PID
+            let pid = args[1].parse::<process::PID>()?;
+            let debugger = Debugger::attach(pid)?;
+            Ok(debugger)
+        },
+        _ => {
+            let program_path = args[0].as_str();
+            let debugger = Debugger::launch(program_path, true, StdoutReplacement::None)?;
+            println!("Launched process with PID {}", debugger.process().pid());
+            Ok(debugger)
+        }
     }
 }
 
 fn main() -> Result<(), DebuggerError> {
     let args: Vec<String> = env::args().collect();
 
-    let mut debugger = attach(args.as_slice())?;
+    // NOTE: first argument should be program name
+    let mut debugger = attach(&args[1..])?;
 
     // install signal handler for SIGINT
     unsafe {

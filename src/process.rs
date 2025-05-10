@@ -231,13 +231,13 @@ impl SyscallCatchPolicy {
 }
 
 #[derive(Copy, Clone, Debug)]
-enum SyscallDirection {
+pub enum SyscallDirection {
     Entry { args: [u64; 6 ]},
     Exit(u64)
 }
 
 #[derive(Copy, Clone, Debug)]
-struct SyscallInfo {
+pub struct SyscallInfo {
     syscall: SyscallType,
     direction: SyscallDirection
 }
