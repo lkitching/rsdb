@@ -186,8 +186,9 @@ impl Elf {
         } else { None }
     }
 
-    pub fn get_symbol_at_virtual_address(&self, addr: VirtualAddress) -> Option<&Elf64_Sym> {
-        self.get_symbol_at_addr(addr.addr())
+    pub fn get_symbol_at_virtual_address(self: &Rc<Self>, addr: VirtualAddress) -> Option<&Elf64_Sym> {
+        let file_addr = addr.to_file_address(self.clone())?;
+        self.get_symbol_at_file_address(&file_addr)
     }
 
     fn get_symbol_containing_addr(&self, addr: usize) -> Option<&Elf64_Sym> {
@@ -281,5 +282,50 @@ impl Drop for Elf {
             // failed to unmap
             panic!("munmap failed!")
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn elf_entry_point_test() -> Result<(), Error> {
+        let elf = Elf::open("target/debug/hello_rsdb")?;
+        let entry = elf.header().e_entry;
+        let addr = FileAddress::new(elf.clone(), entry as usize);
+        let sym = elf.get_symbol_at_file_address(&addr).expect("Failed to find symbol by address");
+        let sym_name = elf.get_string(sym.st_name as usize).expect("Failed to resolve symbol name");
+
+        assert_eq!("_start", sym_name, "Unexpected entry point");
+        Ok(())
+    }
+
+    #[test]
+    fn get_symbol_by_name_test() -> Result<(), Error> {
+        let elf = Elf::open("target/debug/hello_rsdb")?;
+        let syms: Vec<&Elf64_Sym> = elf.get_symbols_by_name("_start").collect();
+
+        assert_eq!(1, syms.len(), "Unexpected number of symbol matches");
+
+        let name = elf.get_string(syms[0].st_name as usize).expect("Failed to resolve symbol name");
+        assert_eq!("_start", name, "Unexpected symbol name");
+        Ok(())
+    }
+
+    #[test]
+    fn get_symbol_by_virtual_address_test() -> Result<(), Error> {
+        let elf = Elf::open("target/debug/hello_rsdb")?;
+
+        let load_address = VirtualAddress::new(0xcafecafeusize);
+        elf.notify_loaded(load_address);
+
+        let entry = elf.header().e_entry;
+        let sym = elf.get_symbol_at_virtual_address(load_address + entry as isize).expect("Failed to find symbol by address");
+        let sym_name = elf.get_string(sym.st_name as usize).expect("Failed to resolve symbol name");
+
+        assert_eq!("_start", sym_name, "Unexpected symbol name");
+
+        Ok(())
     }
 }
