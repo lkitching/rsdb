@@ -871,6 +871,8 @@ impl Process {
         while key != AT_NULL {
             let value = read_u64(&mut f)?;
             map.insert(key, value);
+
+            key = read_u64(&mut f)?;
         }
 
         Ok(map)
