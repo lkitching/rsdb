@@ -15,3 +15,4 @@ pub mod disassembler;
 pub mod syscalls;
 pub mod elf;
 pub mod multimap;
+pub mod dwarf;
