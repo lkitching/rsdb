@@ -7,7 +7,18 @@ use std::ops::AddAssign;
 use crate::elf::{Elf};
 use crate::types::TryFromBytes;
 
-struct Abbrev;
+struct AttributeSpec {
+    attribute: u64,
+    form: u64
+}
+
+struct Abbrev {
+    code: u64,
+    tag: u64,
+    has_children: bool,
+    attribute_specs: Vec<AttributeSpec>
+}
+
 struct AbbrevTable {
     entries: HashMap<u64, Abbrev>
 }
@@ -18,6 +29,14 @@ struct Cursor<'a> {
 }
 
 impl <'a> Cursor<'a> {
+    fn new(data: &'a[u8]) -> Self {
+        Self { data, position: 0 }
+    }
+
+    fn set_position(&mut self, position: usize) {
+        self.position = position;
+    }
+
     fn fixed_int<T: TryFromBytes, const N: usize>(&mut self) -> T {
         // TODO: check remaining bytes?
         let bytes = &self.data[self.position..self.position + N];
@@ -117,15 +136,15 @@ impl <'a> Cursor<'a> {
     }
 }
 
-impl <'a> AddAssign<isize> for Cursor<'a> {
-    fn add_assign(&mut self, rhs: isize) {
-        if rhs >= 0 {
-            self.position += rhs as usize;
-        } else {
-            self.position += rhs.abs() as usize
-        }
-    }
-}
+// impl <'a> AddAssign<isize> for Cursor<'a> {
+//     fn add_assign(&mut self, rhs: isize) {
+//         if rhs >= 0 {
+//             self.position += rhs as usize;
+//         } else {
+//             self.position += rhs.abs() as usize
+//         }
+//     }
+// }
 
 pub struct Dwarf {
     elf: Rc<Elf>,
@@ -134,7 +153,41 @@ pub struct Dwarf {
 
 impl Dwarf {
     fn parse_abbrev_table(elf: &Elf, offset: usize) -> AbbrevTable {
-        unimplemented!()
+        let section = elf.get_section_contents(".debug_abbrev").expect("Failed to get .debug_abbrev section");
+        let mut cursor = Cursor::new(section);
+        cursor.set_position(offset);
+
+        let mut entries = HashMap::new();
+        loop {
+            let code = cursor.uleb128();
+            let tag = cursor.uleb128();
+            let has_children = {
+                let flag = cursor.u8();
+                flag != 0
+            };
+
+            // parse attr specs
+            let mut attribute_specs = Vec::new();
+            loop {
+                let attribute = cursor.uleb128();
+                let form = cursor.uleb128();
+
+                if attribute == 0 {
+                    break;
+                } else {
+                    attribute_specs.push(AttributeSpec { attribute, form })
+                }
+            }
+
+            if code == 0 {
+                break;
+            } else {
+                let abbrev = Abbrev { code, tag, has_children, attribute_specs };
+                entries.insert(code, abbrev);
+            }
+        }
+
+        AbbrevTable { entries }
     }
 
     fn get_abbrev_table(&mut self, offset: usize) -> &AbbrevTable {
