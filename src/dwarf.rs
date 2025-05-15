@@ -6,6 +6,7 @@ use std::ops::AddAssign;
 
 use crate::elf::{Elf};
 use crate::types::TryFromBytes;
+use crate::error::Error;
 
 struct AttributeSpec {
     attribute: u64,
@@ -35,6 +36,10 @@ impl <'a> Cursor<'a> {
 
     fn set_position(&mut self, position: usize) {
         self.position = position;
+    }
+
+    fn is_finished(&self) -> bool {
+        self.position >= self.data.len()
     }
 
     fn fixed_int<T: TryFromBytes, const N: usize>(&mut self) -> T {
@@ -136,15 +141,27 @@ impl <'a> Cursor<'a> {
     }
 }
 
-// impl <'a> AddAssign<isize> for Cursor<'a> {
-//     fn add_assign(&mut self, rhs: isize) {
-//         if rhs >= 0 {
-//             self.position += rhs as usize;
-//         } else {
-//             self.position += rhs.abs() as usize
-//         }
-//     }
-// }
+impl <'a> AddAssign<usize> for Cursor<'a> {
+    fn add_assign(&mut self, rhs: usize) {
+        self.position += rhs
+    }
+}
+
+struct CompileUnit<'a> {
+    //parent: &'a Dwarf,
+    data: &'a [u8],
+    abbrev_offset: usize
+}
+
+impl <'a> CompileUnit<'a> {
+    fn new(data: &'a [u8], abbrev_offset: usize) -> Self {
+        Self { data, abbrev_offset }
+    }
+
+    fn get_abbrev_table<'b>(&self, parent: &'b mut Dwarf) -> &'b AbbrevTable {
+        parent.get_abbrev_table(self.abbrev_offset)
+    }
+}
 
 pub struct Dwarf {
     elf: Rc<Elf>,
@@ -192,5 +209,50 @@ impl Dwarf {
 
     fn get_abbrev_table(&mut self, offset: usize) -> &AbbrevTable {
         self.abbrev_tables.entry(offset).or_insert_with(|| Self::parse_abbrev_table(self.elf.as_ref(), offset))
+    }
+
+    fn parse_compile_unit<'a : 'b, 'b>(debug_data: &'a [u8], cursor: &'b mut Cursor) -> Result<CompileUnit<'a>, Error> {
+        let start = cursor.position;
+        let size = cursor.u32();
+        let version = cursor.u16();
+        let abbrev_offset = cursor.u32() as usize;
+        let address_size = cursor.u8();
+
+        if size == 0xFFFFFFFF {
+            return Err(Error::from_message("Only DWARF32 is supported".to_string()));
+        }
+
+        if version != 4 {
+            return Err(Error::from_message("Invalid address size for DWARF".to_string()));
+        }
+
+        if address_size != 8 {
+            return Err(Error::from_message("Only DWARF version 4 is supported".to_string()));
+        }
+
+        // NOTE: size field contains the size of the entry excluding the size of the size field itself
+        // add this back in to the compile unit size
+        let size = size + size_of::<u32>() as u32;
+        let data = &debug_data[start..start + size as usize];
+
+        Ok(CompileUnit { data, abbrev_offset })
+    }
+
+    fn parse_compile_units(elf: &Elf) -> Result<Vec<CompileUnit>, Error> {
+        let debug_info = elf.get_section_contents(".debug_info").expect("Failed to get .debug_info section");
+        let mut cursor = Cursor::new(debug_info);
+
+        let mut units = Vec::new();
+
+        while !cursor.is_finished() {
+            let unit_header = Self::parse_compile_unit(debug_info, &mut cursor)?;
+
+            // skip over compile unit data
+            cursor += unit_header.data.len();
+
+            units.push(unit_header);
+        }
+
+        Ok(units)
     }
 }
