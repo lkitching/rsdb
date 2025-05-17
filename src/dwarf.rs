@@ -4,9 +4,42 @@ use std::ffi::CStr;
 use std::mem;
 use std::ops::AddAssign;
 
+use strum_macros::FromRepr;
+
 use crate::elf::{Elf};
 use crate::types::TryFromBytes;
 use crate::error::Error;
+
+#[allow(non_camel_case_types)]
+#[repr(u64)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, FromRepr)]
+enum DwarfForm {
+    DW_FORM_addr = 0x01,
+    DW_FORM_block2 = 0x03,
+    DW_FORM_block4 = 0x04,
+    DW_FORM_data2 = 0x05,
+    DW_FORM_data4 = 0x06,
+    DW_FORM_data8 = 0x07,
+    DW_FORM_string = 0x08,
+    DW_FORM_block = 0x09,
+    DW_FORM_block1 = 0x0a,
+    DW_FORM_data1 = 0x0b,
+    DW_FORM_flag = 0x0c,
+    DW_FORM_sdata = 0x0d,
+    DW_FORM_strp = 0x0e,
+    DW_FORM_udata = 0x0f,
+    DW_FORM_ref_addr = 0x10,
+    DW_FORM_ref1 = 0x11,
+    DW_FORM_ref2 = 0x12,
+    DW_FORM_ref4 = 0x13,
+    DW_FORM_ref8 = 0x14,
+    DW_FORM_ref_udata = 0x15,
+    DW_FORM_indirect = 0x16,
+    DW_FORM_sec_offset = 0x17,
+    DW_FORM_exprloc = 0x18,
+    DW_FORM_flag_present = 0x19,
+    DW_FORM_ref_sig8 = 0x20,
+}
 
 struct AttributeSpec {
     attribute: u64,
@@ -22,6 +55,12 @@ struct Abbrev {
 
 struct AbbrevTable {
     entries: HashMap<u64, Abbrev>
+}
+
+impl AbbrevTable {
+    fn get_by_code(&self, code: u64) -> Option<&Abbrev> {
+        self.entries.get(&code)
+    }
 }
 
 struct Cursor<'a> {
@@ -139,6 +178,72 @@ impl <'a> Cursor<'a> {
 
         unsafe { mem::transmute(res) }
     }
+
+    fn skip_form(&mut self, form: DwarfForm) {
+        use DwarfForm::*;
+
+        match form {
+            DW_FORM_flag_present => {
+                // NOTE: attribute indicates presence so value uses no space
+            },
+            DW_FORM_data1 | DW_FORM_ref1 | DW_FORM_flag => {
+                self.position += 1;
+            },
+            DW_FORM_data2 | DW_FORM_ref2 => {
+                self.position += 2
+            },
+            DW_FORM_data4 | DW_FORM_ref4 | DW_FORM_ref_addr | DW_FORM_sec_offset | DW_FORM_strp => {
+                self.position += 4
+            },
+            DW_FORM_data8 | DW_FORM_addr => {
+                // WARNING: DW_FORM_addr depends on system address size!
+                // we only support 64-bit so far
+                self.position += 8
+            },
+            DW_FORM_sdata => {
+                self.sleb128();
+            },
+            DW_FORM_udata | DW_FORM_ref_udata => {
+                self.uleb128();
+            },
+            DW_FORM_block1 => {
+                let len = self.u8();
+                self.position += len as usize;
+            },
+            DW_FORM_block2 => {
+                let len = self.u16();
+                self.position += len as usize;
+            },
+            DW_FORM_block4 => {
+                let len = self.u32();
+                self.position += len as usize;
+            },
+            DW_FORM_block | DW_FORM_exprloc => {
+                let len = self.uleb128();
+                self.position += len as usize;
+            },
+            DW_FORM_string => {
+                // search for terminating 0 byte
+                while !self.is_finished() && self.data[self.position] != 0 {
+                    self.position += 1;
+                }
+
+                // skip past null terminator
+                self.position += 1;
+            },
+            DW_FORM_indirect => {
+                // indirect form
+                let raw_form = self.uleb128();
+                let form = DwarfForm::from_repr(raw_form).expect("Invalid DWARF form value");
+                self.skip_form(form);
+            },
+            DW_FORM_ref8 | DW_FORM_ref_sig8 => {
+                // NOTE: not supported in the book!
+                panic!("DW_FORM_ref8 and DW_FORM_ref_sig8 forms not supported");
+                self.position += 8;
+            }
+        }
+    }
 }
 
 impl <'a> AddAssign<usize> for Cursor<'a> {
@@ -147,10 +252,59 @@ impl <'a> AddAssign<usize> for Cursor<'a> {
     }
 }
 
+enum DIE {
+    Null(usize),
+    Entry { position: usize, next: usize, attribute_locations: Vec<usize> }
+}
+
+impl DIE {
+
+}
+
 struct CompileUnit<'a> {
     //parent: &'a Dwarf,
     data: &'a [u8],
     abbrev_offset: usize
+}
+
+impl <'a> CompileUnit<'a> {
+    fn parse_die(&self, cursor: &mut Cursor) -> DIE {
+        let position = cursor.position;
+        let abbrev_code = cursor.uleb128();
+
+        if abbrev_code == 0 {
+            // null DIE
+            // next DIE is at current cursor position
+            DIE::Null(cursor.position)
+        } else {
+            // get abbreviation table for compile unit
+            // and lookup abbrev by code
+            let abbrev = self.abbreviation_table().get_by_code(abbrev_code).expect("Failed to find abbreviation code");
+
+            let mut attribute_locations = Vec::with_capacity(abbrev.attribute_specs.len());
+            for attr in abbrev.attribute_specs.iter() {
+                attribute_locations.push(cursor.position);
+                // TODO: parse on construction!
+                let form = DwarfForm::from_repr(attr.form).expect("Invalid dwarf form");
+                cursor.skip_form(form)
+            }
+
+            // next DIE should be at current cursor position
+            let next = cursor.position;
+            DIE::Entry { position, next, attribute_locations }
+        }
+    }
+
+    fn abbreviation_table(&self) -> &AbbrevTable {
+        unimplemented!()
+    }
+
+    fn root(&self) -> DIE {
+        // NOTE: data contains entire compile unit data including the 11-byte header
+        // create cursor for unit DIE data
+        let mut cursor = Cursor::new(&self.data[11..]);
+        self.parse_die(&mut cursor)
+    }
 }
 
 impl <'a> CompileUnit<'a> {

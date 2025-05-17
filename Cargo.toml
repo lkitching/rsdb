@@ -11,6 +11,8 @@ libc = "0.2"
 rustyline = "15.0"
 registers-macro = { path = "./registers-macro" }
 zydis-sys = "0.1.2"
+strum = "0.27"
+strum_macros = "0.27"
 
 [dev-dependencies]
 regex = "1.11.1"
