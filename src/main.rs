@@ -37,15 +37,23 @@ fn attach(args: &[String]) -> Result<Debugger, DebuggerError> {
 }
 
 fn main() -> Result<(), DebuggerError> {
-    let args: Vec<String> = env::args().collect();
+    // let args: Vec<String> = env::args().collect();
+    //
+    // // NOTE: first argument should be program name
+    // let mut debugger = attach(&args[1..])?;
+    //
+    // // install signal handler for SIGINT
+    // unsafe {
+    //     PID = Some(debugger.process().pid());
+    //     signal(SIGINT, handle_sigint as sighandler_t);
+    // }
+    // debugger.main_loop()
 
-    // NOTE: first argument should be program name
-    let mut debugger = attach(&args[1..])?;
-
-    // install signal handler for SIGINT
-    unsafe {
-        PID = Some(debugger.process().pid());
-        signal(SIGINT, handle_sigint as sighandler_t);
+    let elf = librsdb::elf::Elf::open("target/debug/hello_rsdb")?;
+    let dwarf = librsdb::dwarf::Dwarf::new(elf);
+    for cu in dwarf.get_compile_units() {
+        println!("{:?}", cu);
     }
-    debugger.main_loop()
+
+    Ok(())
 }

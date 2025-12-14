@@ -2,12 +2,13 @@ use std::rc::Rc;
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::mem;
+use std::num::NonZeroU64;
 use std::ops::AddAssign;
 
 use strum_macros::FromRepr;
 
 use crate::elf::{Elf};
-use crate::types::TryFromBytes;
+use crate::types::{FileAddress, TryFromBytes};
 use crate::error::Error;
 
 #[allow(non_camel_case_types)]
@@ -41,11 +42,117 @@ enum DwarfForm {
     DW_FORM_ref_sig8 = 0x20,
 }
 
+#[allow(non_camel_case_types)]
+#[repr(u64)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, FromRepr)]
+enum DwarfAttribute {
+    DW_AT_sibling = 0x01,
+    DW_AT_location = 0x02,
+    DW_AT_name = 0x03,
+    DW_AT_ordering = 0x09,
+    DW_AT_byte_size = 0x0b,
+    DW_AT_bit_offset = 0x0c,
+    DW_AT_bit_size = 0x0d,
+    DW_AT_stmt_list = 0x10,
+    DW_AT_low_pc = 0x11,
+    DW_AT_high_pc = 0x12,
+    DW_AT_language = 0x13,
+    DW_AT_discr = 0x15,
+    DW_AT_discr_value = 0x16,
+    DW_AT_visibility = 0x17,
+    DW_AT_import = 0x18,
+    DW_AT_string_length = 0x19,
+    DW_AT_common_reference = 0x1a,
+    DW_AT_comp_dir = 0x1b,
+    DW_AT_const_value = 0x1c,
+    DW_AT_containing_type = 0x1d,
+    DW_AT_default_value = 0x1e,
+    DW_AT_inline = 0x20,
+    DW_AT_is_optional = 0x21,
+    DW_AT_lower_bound = 0x22,
+    DW_AT_producer = 0x25,
+    DW_AT_prototyped = 0x27,
+    DW_AT_return_addr = 0x2a,
+    DW_AT_start_scope = 0x2c,
+    DW_AT_bit_stride = 0x2e,
+    DW_AT_upper_bound = 0x2f,
+    DW_AT_abstract_origin = 0x31,
+    DW_AT_accessibility = 0x32,
+    DW_AT_address_class = 0x33,
+    DW_AT_artificial = 0x34,
+    DW_AT_base_types = 0x35,
+    DW_AT_calling_convention = 0x36,
+    DW_AT_count = 0x37,
+    DW_AT_data_member_location = 0x38,
+    DW_AT_decl_column = 0x39,
+    DW_AT_decl_file = 0x3a,
+    DW_AT_decl_line = 0x3b,
+    DW_AT_declaration = 0x3c,
+    DW_AT_discr_list = 0x3d,
+    DW_AT_encoding = 0x3e,
+    DW_AT_external = 0x3f,
+    DW_AT_frame_base = 0x40,
+    DW_AT_friend = 0x41,
+    DW_AT_identifier_case = 0x42,
+    DW_AT_macro_info = 0x43,
+    DW_AT_namelist_item = 0x44,
+    DW_AT_priority = 0x45,
+    DW_AT_segment = 0x46,
+    DW_AT_specification = 0x47,
+    DW_AT_static_link = 0x48,
+    DW_AT_type = 0x49,
+    DW_AT_use_location = 0x4a,
+    DW_AT_variable_parameter = 0x4b,
+    DW_AT_virtuality = 0x4c,
+    DW_AT_vtable_elem_location = 0x4d,
+    DW_AT_allocated = 0x4e,
+    DW_AT_associated = 0x4f,
+    DW_AT_data_location = 0x50,
+    DW_AT_byte_stride = 0x51,
+    DW_AT_entry_pc = 0x52,
+    DW_AT_use_UTF8 = 0x53,
+    DW_AT_extension = 0x54,
+    DW_AT_ranges = 0x55,
+    DW_AT_trampoline = 0x56,
+    DW_AT_call_column = 0x57,
+    DW_AT_call_file = 0x58,
+    DW_AT_call_line = 0x59,
+    DW_AT_description = 0x5a,
+    DW_AT_binary_scale = 0x5b,
+    DW_AT_decimal_scale = 0x5c,
+    DW_AT_small = 0x5d,
+    DW_AT_decimal_sign = 0x5e,
+    DW_AT_digit_count = 0x5f,
+    DW_AT_picture_string = 0x60,
+    DW_AT_mutable = 0x61,
+    DW_AT_threads_scaled = 0x62,
+    DW_AT_explicit = 0x63,
+    DW_AT_object_pointer = 0x64,
+    DW_AT_endianity = 0x65,
+    DW_AT_elemental = 0x66,
+    DW_AT_pure = 0x67,
+    DW_AT_recursive = 0x68,
+    DW_AT_signature = 0x69,
+    DW_AT_main_subprogram = 0x6a,
+    DW_AT_data_bit_offset = 0x6b,
+    DW_AT_const_expr = 0x6c,
+    DW_AT_enum_class = 0x6d,
+    DW_AT_linkage_name = 0x6e,
+
+    /* From DWARF5, but GCC still outputs in DWARF4 mode */
+    DW_AT_defaulted = 0x8b,
+
+    DW_AT_lo_user = 0x2000,
+    DW_AT_hi_user = 0x3fff,
+}
+
+#[derive(Copy, Clone, Debug)]
 struct AttributeSpec {
     attribute: u64,
     form: u64
 }
 
+#[derive(Clone, Debug)]
 struct Abbrev {
     code: u64,
     tag: u64,
@@ -54,12 +161,13 @@ struct Abbrev {
 }
 
 struct AbbrevTable {
+    // TODO: change key type to NonZeroU64
     entries: HashMap<u64, Abbrev>
 }
 
 impl AbbrevTable {
-    fn get_by_code(&self, code: u64) -> Option<&Abbrev> {
-        self.entries.get(&code)
+    fn get_by_code(&self, code: NonZeroU64) -> Option<&Abbrev> {
+        self.entries.get(&code.get())
     }
 }
 
@@ -179,6 +287,13 @@ impl <'a> Cursor<'a> {
         unsafe { mem::transmute(res) }
     }
 
+    fn bytes(&mut self, len: usize) -> &'a [u8] {
+        // TODO: error if len too large!
+        let bytes = &self.data[self.position..self.position + len];
+        self.position += len;
+        bytes
+    }
+
     fn skip_form(&mut self, form: DwarfForm) {
         use DwarfForm::*;
 
@@ -252,77 +367,438 @@ impl <'a> AddAssign<usize> for Cursor<'a> {
     }
 }
 
-enum DIE {
-    Null(usize),
-    Entry { position: usize, next: usize, attribute_locations: Vec<usize> }
+struct Attribute {
+    attr_type: u64,
+    attr_form: DwarfForm,
+    attr_location: usize
+}
+
+impl Attribute {
+    fn as_address(&self, dwarf: &Dwarf) -> Result<FileAddress, Error> {
+        unimplemented!()
+        // match self.attr_form {
+        //     DwarfForm::DW_FORM_addr => {
+        //         let mut cursor = Cursor::new(self.compile_unit.data);
+        //         cursor.set_position(self.attr_location);
+        //         let addr = cursor.u64();
+        //         let file_addr = FileAddress::new(dwarf.elf.clone(), addr as usize);
+        //         Ok(file_addr)
+        //     },
+        //     _ => Err(Error::from_message(String::from("Invalid address type")))
+        // }
+    }
+
+    fn as_section_offset(&self) -> Result<u32, Error> {
+        unimplemented!()
+        // match self.attr_form {
+        //     DwarfForm::DW_FORM_sec_offset => {
+        //         let mut cursor = Cursor::new(self.compile_unit.data);
+        //         cursor.set_position(self.attr_location);
+        //         let offset = cursor.u32();
+        //         Ok(offset)
+        //     },
+        //     _ => Err(Error::from_message(String::from("Invalid offset type")))
+        // }
+    }
+
+    fn as_int(&self) -> Result<u64, Error> {
+        unimplemented!()
+        // let mut cursor = Cursor::new(self.compile_unit.data);
+        // cursor.set_position(self.attr_location);
+        //
+        // match self.attr_form {
+        //     DwarfForm::DW_FORM_data1 => Ok(cursor.u8() as u64),
+        //     DwarfForm::DW_FORM_data2 => Ok(cursor.u16() as u64),
+        //     DwarfForm::DW_FORM_data4 => Ok(cursor.u32() as u64),
+        //     DwarfForm::DW_FORM_data8 => Ok(cursor.u64()),
+        //     DwarfForm::DW_FORM_udata => Ok(cursor.uleb128()),
+        //     _ => Err(Error::from_message(String::from("Invalid integer type")))
+        // }
+    }
+
+    fn as_block(&self) -> Result<Vec<u8>, Error> {
+        unimplemented!()
+        // let mut cursor = Cursor::new(self.compile_unit.data);
+        // cursor.set_position(self.attr_location);
+        //
+        // let size = match self.attr_form {
+        //     DwarfForm::DW_FORM_block1 => cursor.u8() as usize,
+        //     DwarfForm::DW_FORM_block2 => cursor.u16() as usize,
+        //     DwarfForm::DW_FORM_block4 => cursor.u32() as usize,
+        //     DwarfForm::DW_FORM_block => cursor.uleb128() as usize,
+        //     _ => return Err(Error::from_message(String::from("Invalid block type")))
+        // };
+        //
+        // // TODO: can return slice?
+        // Ok(cursor.bytes(size).to_vec())
+    }
+
+    fn as_reference(&self, dwarf: &mut Dwarf) -> Result<DIEEntry, Error> {
+        unimplemented!()
+        // let mut cursor = Cursor::new(self.compile_unit.data);
+        // cursor.set_position(self.attr_location);
+        //
+        // let offset = match self.attr_form {
+        //     DwarfForm::DW_FORM_ref1 => cursor.u8() as usize,
+        //     DwarfForm::DW_FORM_ref2 => cursor.u16() as usize,
+        //     DwarfForm::DW_FORM_ref4 => cursor.u32() as usize,
+        //     DwarfForm::DW_FORM_ref8 => cursor.u64() as usize,
+        //     DwarfForm::DW_FORM_udata => cursor.uleb128() as usize,
+        //     DwarfForm::DW_FORM_ref_addr => {
+        //         // WARNING: offset is stored in this compile unit's data but the offset itself is from
+        //         // the start of the .debug_info section data
+        //         let offset = cursor.u32() as usize;
+        //         let section = dwarf.elf.get_section_contents(".debug_info").expect("Failed to get .debug_info section");
+        //         let mut cursor = Cursor::new(section);
+        //         cursor.set_position(offset);
+        //
+        //         // find compile unit containing offset
+        //         // TODO: add start/end offsets to CompileUnit!
+        //         let compile_unit = dwarf.compile_units().iter().find(|cu| cu.contains_offset(offset)).expect("Failed to find compile unit at offset {}", offset);
+        //         let die_entry = compile_unit.parse_die_entry(&mut cursor);
+        //
+        //         return Ok(die_entry);
+        //     },
+        //     other => return Err(Error::from_message(format!("Invalid reference type: {:#?}", other)))
+        // };
+        //
+        // // NOTE: if we end up here the offset is an offset into the compile unit data
+        // cursor.set_position(offset);
+        //
+        // let die_entry = self.compile_unit.parse_die_entry(&mut cursor);
+        // Ok(die_entry)
+    }
+
+    fn as_string(&self, dwarf: &Dwarf) -> Result<String, Error> {
+        unimplemented!()
+        // let mut cursor = Cursor::new(self.compile_unit.data);
+        // match self.attr_form {
+        //     DwarfForm::DW_FORM_string => {
+        //         let s = cursor.string();
+        //         Ok(s)
+        //     },
+        //     DwarfForm::DW_FORM_strp => {
+        //         let offset = cursor.u32() as usize;
+        //         let str_table = dwarf.elf.get_section_contents(".debug_str").expect("Failed to get .debug_str section");
+        //         let mut cursor = Cursor::new(str_table);
+        //         cursor.set_position(offset);
+        //         let s = cursor.string();
+        //         Ok(s)
+        //     },
+        //     other => Err(Error::from_message(format!("Invalid string type {:#?}", other)))
+        // }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct DIE {
+    position: usize,
+    next: usize,
+    abbrev_code: NonZeroU64,
+    attribute_locations: Vec<usize>
 }
 
 impl DIE {
+    // fn contains(&self, compile_unit: &CompileUnit, attribute: u64) -> bool {
+    //     let abbrev = compile_unit.get_abbrev_table().get_by_code(self.abbrev_code).expect("Failed to get abbrev");
+    //     abbrev.attribute_specs.iter().find(|spec| spec.attribute == attribute).is_some()
+    // }
 
+    fn get_attribute(&self, compile_unit: CompileUnit, attribute: u64) -> Option<Attribute> {
+        unimplemented!()
+        // let abbrev = compile_unit.get_abbrev_table().get_by_code(self.abbrev_code).expect("Failed to get abbrev");
+        //
+        // for attr_index in 0..abbrev.attribute_specs.len() {
+        //
+        //     let attr_spec = &abbrev.attribute_specs[attr_index];
+        //     if attr_spec.attribute == attribute {
+        //         let attr = Attribute {
+        //             attr_type: attr_spec.attribute,
+        //             attr_form: attr_spec.form,
+        //             attr_location: self.attribute_locations[attr_index]
+        //         };
+        //         return Some(attr)
+        //     }
+        // }
+        //
+        // // attribute not found
+        // None
+    }
 }
 
-struct CompileUnit<'a> {
-    //parent: &'a Dwarf,
-    data: &'a [u8],
-    abbrev_offset: usize
+enum DIEEntry {
+    Null(usize),
+    Entry(DIE)
 }
 
-impl <'a> CompileUnit<'a> {
-    fn parse_die(&self, cursor: &mut Cursor) -> DIE {
-        let position = cursor.position;
-        let abbrev_code = cursor.uleb128();
+#[derive(Debug)]
+pub struct CompileUnitHeader {
+    // offset of the start of the compile unit within the .debug_info section
+    offset: usize,
+    size: u32,
+    version: u16,
+    abbrev_offset: usize,
+    address_size: u8,
+}
 
-        if abbrev_code == 0 {
-            // null DIE
-            // next DIE is at current cursor position
-            DIE::Null(cursor.position)
-        } else {
-            // get abbreviation table for compile unit
-            // and lookup abbrev by code
-            let abbrev = self.abbreviation_table().get_by_code(abbrev_code).expect("Failed to find abbreviation code");
+impl CompileUnitHeader {
+    const LEN_BYTES: usize = 4 + 2 + 4 + 1;
 
-            let mut attribute_locations = Vec::with_capacity(abbrev.attribute_specs.len());
-            for attr in abbrev.attribute_specs.iter() {
-                attribute_locations.push(cursor.position);
-                // TODO: parse on construction!
-                let form = DwarfForm::from_repr(attr.form).expect("Invalid dwarf form");
-                cursor.skip_form(form)
-            }
+    fn parse(cursor: &mut Cursor) -> Result<Self, Error> {
+        let offset = cursor.position;
+        let size = cursor.u32();
+        let version = cursor.u16();
+        let abbrev_offset = cursor.u32() as usize;
+        let address_size = cursor.u8();
 
-            // next DIE should be at current cursor position
-            let next = cursor.position;
-            DIE::Entry { position, next, attribute_locations }
+        if size == 0xFFFFFFFF {
+            return Err(Error::from_message("Only DWARF32 is supported".to_string()));
         }
+
+        if version != 4 {
+            return Err(Error::from_message("Invalid address size for DWARF".to_string()));
+        }
+
+        if address_size != 8 {
+            return Err(Error::from_message("Only DWARF version 4 is supported".to_string()));
+        }
+
+        let header = Self {
+            offset, size, version, abbrev_offset, address_size
+        };
+        Ok(header)
+    }
+
+    // get the total size of this compile unit in bytes
+    fn compile_unit_len(&self) -> u32 {
+        // NOTE: size field contains the size of the compile unit header + data, excluding the size of the size field itself
+        // add this back in to the compile unit size
+        self.size + size_of::<u32>() as u32
+    }
+
+    fn data_len(&self) -> usize {
+        self.compile_unit_len() as usize - Self::LEN_BYTES
+    }
+
+    // get start offset for data within the .debug_info section
+    fn data_offset(&self) -> usize {
+        self.offset + Self::LEN_BYTES as usize
+    }
+}
+
+#[derive(Debug)]
+pub struct CompileUnit {
+    header: CompileUnitHeader,
+    //parent: &'a Dwarf,
+    //data: &'a [u8],
+
+    // offset of the abbrev definition of this compile unit within the .debug_abbrev section
+    //abbrev_offset: usize
+}
+
+impl CompileUnit {
+    // fn new(data: &'a [u8], abbrev_offset: usize) -> Self {
+    //     Self { data, abbrev_offset }
+    // }
+
+    fn new(header: CompileUnitHeader) -> Self {
+        Self { header }
+    }
+
+    fn get_abbrev_table<'b>(&self, parent: &'b mut Dwarf) -> &'b AbbrevTable {
+        //parent.get_abbrev_table(self.abbrev_offset)
+        unimplemented!()
     }
 
     fn abbreviation_table(&self) -> &AbbrevTable {
         unimplemented!()
     }
 
-    fn root(&self) -> DIE {
+    fn parse_die_entry(&self, cursor: &mut Cursor) -> DIEEntry {
+        let position = cursor.position;
+        let abbrev_code = cursor.uleb128();
+
+        match NonZeroU64::new(abbrev_code) {
+            None => {
+                // null DIE
+                // next DIE is at current cursor position
+                DIEEntry::Null(cursor.position)
+            },
+            Some(abbrev_code) => {
+                // get abbreviation table for compile unit
+                // and lookup abbrev by code
+                let abbrev = self.abbreviation_table().get_by_code(abbrev_code).expect("Failed to find abbreviation code");
+
+                let mut attribute_locations = Vec::with_capacity(abbrev.attribute_specs.len());
+                for attr in abbrev.attribute_specs.iter() {
+                    attribute_locations.push(cursor.position);
+                    // TODO: parse on construction!
+                    let form = DwarfForm::from_repr(attr.form).expect("Invalid dwarf form");
+                    cursor.skip_form(form)
+                }
+
+                // next DIE should be at current cursor position
+                let next = cursor.position;
+                let die = DIE { position, next, attribute_locations, abbrev_code };
+                DIEEntry::Entry(die)
+            }
+        }
+    }
+
+    fn root(&self) -> DIEEntry {
         // NOTE: data contains entire compile unit data including the 11-byte header
         // create cursor for unit DIE data
-        let mut cursor = Cursor::new(&self.data[11..]);
-        self.parse_die(&mut cursor)
+        // let mut cursor = Cursor::new(&self.data[11..]);
+        // self.parse_die_entry(&mut cursor)
+        unimplemented!()
+    }
+
+    fn children_of(&self, dwarf: &mut Dwarf, die: &DIE) -> DIEChildIterator {
+        // let parent_abbrev = self.get_abbrev_table(dwarf).get_by_code(die.abbrev_code).expect("Failed to get parent abbrev");
+        // DIEChildIterator {
+        //     compile_unit: self,
+        //     state: ChildIteratorState::Parent(die.next, parent_abbrev.clone()),
+        //     cursor: Cursor::new(self.data)
+        // }
+        unimplemented!()
     }
 }
 
-impl <'a> CompileUnit<'a> {
-    fn new(data: &'a [u8], abbrev_offset: usize) -> Self {
-        Self { data, abbrev_offset }
-    }
+enum ChildIteratorState {
+    Parent(usize, Abbrev),
+    Sibling(DIE, Abbrev),
+    Finished
+}
 
-    fn get_abbrev_table<'b>(&self, parent: &'b mut Dwarf) -> &'b AbbrevTable {
-        parent.get_abbrev_table(self.abbrev_offset)
+struct DIEChildIterator<'a> {
+    compile_unit: &'a CompileUnit,
+    state: ChildIteratorState,
+    cursor: Cursor<'a>,
+}
+
+impl <'a> Iterator for DIEChildIterator<'a> {
+    type Item = DIE;
+    fn next(&mut self) -> Option<Self::Item> {
+        unimplemented!()
+        // match self.state {
+        //     ChildIteratorState::Parent(next_pos, ref parent_abbrev) => {
+        //         self.cursor.set_position(next_pos);
+        //
+        //         if parent_abbrev.has_children {
+        //             // next item is the first child of the parent
+        //             let child_die_entry = self.compile_unit.parse_die_entry(&mut self.cursor);
+        //
+        //             match child_die_entry {
+        //                 DIEEntry::Null(sibling_pos) => {
+        //                     // parent can have children but has none
+        //                     // next DIE entry is therefore sibling of the parent
+        //                     // set cursor position to point to next item
+        //                     self.cursor.set_position(sibling_pos);
+        //                     self.state = ChildIteratorState::Finished;
+        //                     None
+        //                 },
+        //                 DIEEntry::Entry(entry) => {
+        //                     // first child
+        //                     let sibling_abbrev = self.compile_unit.get_abbrev_table().get_by_code(entry.abbrev_code).expect("Failed to get sibling abbrev");
+        //                     self.state = ChildIteratorState::Sibling(entry.clone(), sibling_abbrev.clone());
+        //                     Some(entry)
+        //                 }
+        //             }
+        //         } else {
+        //             // parent has no children
+        //             self.state = ChildIteratorState::Finished;
+        //             None
+        //         }
+        //     },
+        //     ChildIteratorState::Sibling(sibling,ref sibling_abbrev) => {
+        //         if sibling_abbrev.has_children {
+        //             // see if the sibling has a DW_AT_sibling attribute
+        //             // if it does this should be a reference to the sibling
+        //             match sibling.get_attribute(self.compile_unit, DwarfAttribute::DW_AT_sibling) {
+        //                 Some(sibling_at_attr) => {
+        //                     let sibling_entry = sibling_at_attr.as_reference().expect("Failed to parse sibling entry");
+        //                     match sibling_entry {
+        //                         DIEEntry::Null(next) => {
+        //                             self.cursor.set_position(next);
+        //                             self.state = ChildIteratorState::Finished;
+        //                             None
+        //                         },
+        //                         DIEEntry::Entry(sibling) => {
+        //                             let sibling_abbrev = self.compile_unit.get_abbrev_table().get_by_code(sibling.abbrev_code).expect("Failed to get sibling abbrev");
+        //                             self.cursor.set_position(sibling.next);
+        //                             self.state = ChildIteratorState::Sibling(sibling.clone(), sibling_abbrev.clone());
+        //                             Some(sibling)
+        //                         }
+        //                     }
+        //                 },
+        //                 None => {
+        //                     // create iterator for sibling's children and skip over them to find next sibling
+        //                     let mut nephew_iter = DIEChildIterator { compile_unit: self.compile_unit, cursor: self.cursor.clone(), state: ChildIteratorState::Parent(sibling_next_pos, sibling_abbrev.clone()) };
+        //                     for _ in nephew_iter {
+        //                     }
+        //
+        //                     // child iterator position points to next sibling
+        //                     self.cursor.set_position(nephew_iter.cursor.position);
+        //
+        //                     // parse next sibling
+        //                     let sibling_entry = CompileUnit::parse_die_entry(&mut self.cursor);
+        //                     match sibling_entry {
+        //                         DIEEntry::Null(next_pos) => {
+        //                             // NOTE: cursor should already be at this position
+        //                             self.cursor.set_position(next_pos);
+        //                             self.state = ChildIteratorState::Finished;
+        //                             None
+        //                         },
+        //                         DIEEntry::Entry(sibling) => {
+        //                             let sibling_abbrev = self.compile_unit.get_abbrev_table().get_by_code(sibling.abbrev_code).expect("Failed to get sibling abbrev");
+        //                             self.state = ChildIteratorState::Sibling(sibling.next, sibling_abbrev.clone());
+        //                             Some(sibling)
+        //                         }
+        //                     }
+        //                 }
+        //             }
+        //         } else {
+        //             // NOTE: cursor should already be at this position
+        //             self.cursor.set_position(sibling_next_pos);
+        //             let sibling = self.compile_unit.parse_die_entry(&mut self.cursor);
+        //
+        //             match sibling {
+        //                 DIEEntry::Null(sibling_next) => {
+        //                     // no more children
+        //                     // move cursor to point to next DIE entry
+        //                     self.cursor.position = sibling_next;
+        //                     self.state = ChildIteratorState::Finished;
+        //                     None
+        //                 },
+        //                 DIEEntry::Entry(sibling) => {
+        //                     let sibling_abbrev = self.compile_unit.get_abbrev_table().get_by_code(sibling.abbrev_code).expect("Failed to get sibling abbrev");
+        //                     self.state = ChildIteratorState::Sibling(sibling.next, sibling_abbrev.clone());
+        //                     Some(sibling)
+        //                 }
+        //             }
+        //         }
+        //     },
+        //     ChildIteratorState::Finished => {
+        //         None
+        //     }
+        // }
     }
 }
 
 pub struct Dwarf {
     elf: Rc<Elf>,
-    abbrev_tables: HashMap<usize, AbbrevTable>
+    abbrev_tables: HashMap<usize, AbbrevTable>,
 }
 
 impl Dwarf {
+    pub fn new(elf: Rc<Elf>) -> Self {
+        Self { elf, abbrev_tables: HashMap::new() }
+    }
+
+    pub fn get_compile_units(&self) -> Vec<CompileUnit> {
+        Self::parse_compile_units(self.elf.as_ref()).expect("Failed to parse compile units")
+    }
+
     fn parse_abbrev_table(elf: &Elf, offset: usize) -> AbbrevTable {
         let section = elf.get_section_contents(".debug_abbrev").expect("Failed to get .debug_abbrev section");
         let mut cursor = Cursor::new(section);
@@ -365,31 +841,14 @@ impl Dwarf {
         self.abbrev_tables.entry(offset).or_insert_with(|| Self::parse_abbrev_table(self.elf.as_ref(), offset))
     }
 
-    fn parse_compile_unit<'a : 'b, 'b>(debug_data: &'a [u8], cursor: &'b mut Cursor) -> Result<CompileUnit<'a>, Error> {
-        let start = cursor.position;
-        let size = cursor.u32();
-        let version = cursor.u16();
-        let abbrev_offset = cursor.u32() as usize;
-        let address_size = cursor.u8();
+    fn parse_compile_unit<'a>(cursor: &'a mut Cursor) -> Result<CompileUnit, Error> {
+        let pos = cursor.position;
+        let header = CompileUnitHeader::parse(cursor)?;
 
-        if size == 0xFFFFFFFF {
-            return Err(Error::from_message("Only DWARF32 is supported".to_string()));
-        }
+        // skip over compile unit data
+        cursor.set_position(pos + header.compile_unit_len() as usize);
 
-        if version != 4 {
-            return Err(Error::from_message("Invalid address size for DWARF".to_string()));
-        }
-
-        if address_size != 8 {
-            return Err(Error::from_message("Only DWARF version 4 is supported".to_string()));
-        }
-
-        // NOTE: size field contains the size of the entry excluding the size of the size field itself
-        // add this back in to the compile unit size
-        let size = size + size_of::<u32>() as u32;
-        let data = &debug_data[start..start + size as usize];
-
-        Ok(CompileUnit { data, abbrev_offset })
+        Ok(CompileUnit { header })
     }
 
     fn parse_compile_units(elf: &Elf) -> Result<Vec<CompileUnit>, Error> {
@@ -399,12 +858,9 @@ impl Dwarf {
         let mut units = Vec::new();
 
         while !cursor.is_finished() {
-            let unit_header = Self::parse_compile_unit(debug_info, &mut cursor)?;
+            let compile_unit = Self::parse_compile_unit(&mut cursor)?;
 
-            // skip over compile unit data
-            cursor += unit_header.data.len();
-
-            units.push(unit_header);
+            units.push(compile_unit);
         }
 
         Ok(units)
