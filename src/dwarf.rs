@@ -147,27 +147,27 @@ enum DwarfAttribute {
 }
 
 #[derive(Copy, Clone, Debug)]
-struct AttributeSpec {
+pub struct AttributeSpec {
     attribute: u64,
     form: u64
 }
 
 #[derive(Clone, Debug)]
-struct Abbrev {
-    code: u64,
+pub struct Abbrev {
+    code: NonZeroU64,
     tag: u64,
     has_children: bool,
     attribute_specs: Vec<AttributeSpec>
 }
 
-struct AbbrevTable {
-    // TODO: change key type to NonZeroU64
-    entries: HashMap<u64, Abbrev>
+#[derive(Debug)]
+pub struct AbbrevTable {
+    entries: HashMap<NonZeroU64, Abbrev>
 }
 
 impl AbbrevTable {
     fn get_by_code(&self, code: NonZeroU64) -> Option<&Abbrev> {
-        self.entries.get(&code.get())
+        self.entries.get(&code)
     }
 }
 
@@ -531,7 +531,7 @@ enum DIEEntry {
     Entry(DIE)
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct CompileUnitHeader {
     // offset of the start of the compile unit within the .debug_info section
     offset: usize,
@@ -586,7 +586,7 @@ impl CompileUnitHeader {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct CompileUnit {
     header: CompileUnitHeader,
     //parent: &'a Dwarf,
@@ -787,6 +787,8 @@ impl <'a> Iterator for DIEChildIterator<'a> {
 
 pub struct Dwarf {
     elf: Rc<Elf>,
+
+    // keys are offsets within the .debug_abbrev section
     abbrev_tables: HashMap<usize, AbbrevTable>,
 }
 
@@ -799,6 +801,10 @@ impl Dwarf {
         Self::parse_compile_units(self.elf.as_ref()).expect("Failed to parse compile units")
     }
 
+    pub fn get_compile_unit_abbrev_table(&mut self, compile_unit: &CompileUnit) -> &AbbrevTable {
+        self.get_abbrev_table(compile_unit.header.abbrev_offset)
+    }
+
     fn parse_abbrev_table(elf: &Elf, offset: usize) -> AbbrevTable {
         let section = elf.get_section_contents(".debug_abbrev").expect("Failed to get .debug_abbrev section");
         let mut cursor = Cursor::new(section);
@@ -806,31 +812,34 @@ impl Dwarf {
 
         let mut entries = HashMap::new();
         loop {
-            let code = cursor.uleb128();
-            let tag = cursor.uleb128();
-            let has_children = {
-                let flag = cursor.u8();
-                flag != 0
-            };
+            // NOTE: The book doesn't break immediately on reading a code of 0
+            // yet apparently works somehow.
+            let code_raw = cursor.uleb128();
+            match NonZeroU64::new(code_raw) {
+                None => break,
+                Some(code) => {
+                    let tag = cursor.uleb128();
+                    let has_children = {
+                        let flag = cursor.u8();
+                        flag != 0
+                    };
 
-            // parse attr specs
-            let mut attribute_specs = Vec::new();
-            loop {
-                let attribute = cursor.uleb128();
-                let form = cursor.uleb128();
+                    // parse attr specs
+                    let mut attribute_specs = Vec::new();
+                    loop {
+                        let attribute = cursor.uleb128();
+                        let form = cursor.uleb128();
 
-                if attribute == 0 {
-                    break;
-                } else {
-                    attribute_specs.push(AttributeSpec { attribute, form })
+                        if attribute == 0 {
+                            break;
+                        } else {
+                            attribute_specs.push(AttributeSpec { attribute, form })
+                        }
+                    }
+
+                    let abbrev = Abbrev { code, tag, has_children, attribute_specs };
+                    entries.insert(code, abbrev);
                 }
-            }
-
-            if code == 0 {
-                break;
-            } else {
-                let abbrev = Abbrev { code, tag, has_children, attribute_specs };
-                entries.insert(code, abbrev);
             }
         }
 
@@ -841,7 +850,7 @@ impl Dwarf {
         self.abbrev_tables.entry(offset).or_insert_with(|| Self::parse_abbrev_table(self.elf.as_ref(), offset))
     }
 
-    fn parse_compile_unit<'a>(cursor: &'a mut Cursor) -> Result<CompileUnit, Error> {
+    fn parse_compile_unit(cursor: &mut Cursor) -> Result<CompileUnit, Error> {
         let pos = cursor.position;
         let header = CompileUnitHeader::parse(cursor)?;
 
@@ -864,5 +873,23 @@ impl Dwarf {
         }
 
         Ok(units)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn get_abbrev_table_test() {
+        let elf = Elf::open("target/debug/hello_rsdb").expect("Failed to open ELF file");
+        let mut dwarf = Dwarf::new(elf);
+        for cu in dwarf.get_compile_units() {
+            println!("{:?}", cu);
+
+            let abbrev_table = dwarf.get_compile_unit_abbrev_table(&cu);
+            println!("Abbrev table:");
+            println!("{:?}", abbrev_table)
+        }
     }
 }
