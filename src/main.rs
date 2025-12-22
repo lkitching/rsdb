@@ -50,13 +50,17 @@ fn main() -> Result<(), DebuggerError> {
     // debugger.main_loop()
 
     let elf = librsdb::elf::Elf::open("target/debug/hello_rsdb")?;
-    let mut dwarf = librsdb::dwarf::Dwarf::new(elf);
+    let dwarf = librsdb::dwarf::Dwarf::new(elf).expect("Failed to parse DWARF");
     for cu in dwarf.get_compile_units() {
         println!("{:?}", cu);
 
         let abbrev_table = dwarf.get_compile_unit_abbrev_table(&cu);
         println!("Abbrev table:");
-        println!("{:?}", abbrev_table)
+        println!("{:?}", abbrev_table);
+        
+        let root_entry = cu.get_root(&dwarf);
+        println!("Root:");
+        println!("{:?}", root_entry);
     }
 
     Ok(())

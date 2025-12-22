@@ -491,7 +491,7 @@ impl Attribute {
 }
 
 #[derive(Clone, Debug)]
-struct DIE {
+pub struct DIE {
     position: usize,
     next: usize,
     abbrev_code: NonZeroU64,
@@ -526,7 +526,8 @@ impl DIE {
     }
 }
 
-enum DIEEntry {
+#[derive(Clone, Debug)]
+pub enum DIEEntry {
     Null(usize),
     Entry(DIE)
 }
@@ -614,7 +615,7 @@ impl CompileUnit {
         unimplemented!()
     }
 
-    fn parse_die_entry(&self, cursor: &mut Cursor) -> DIEEntry {
+    fn parse_die_entry(&self, cursor: &mut Cursor, dwarf: &Dwarf) -> DIEEntry {
         let position = cursor.position;
         let abbrev_code = cursor.uleb128();
 
@@ -627,7 +628,7 @@ impl CompileUnit {
             Some(abbrev_code) => {
                 // get abbreviation table for compile unit
                 // and lookup abbrev by code
-                let abbrev = self.abbreviation_table().get_by_code(abbrev_code).expect("Failed to find abbreviation code");
+                let abbrev = dwarf.get_compile_unit_abbrev_table(self).get_by_code(abbrev_code).expect("Failed to find abbreviation code");
 
                 let mut attribute_locations = Vec::with_capacity(abbrev.attribute_specs.len());
                 for attr in abbrev.attribute_specs.iter() {
@@ -645,12 +646,15 @@ impl CompileUnit {
         }
     }
 
-    fn root(&self) -> DIEEntry {
+    pub fn get_root(&self, dwarf: &Dwarf) -> DIEEntry {
         // NOTE: data contains entire compile unit data including the 11-byte header
         // create cursor for unit DIE data
-        // let mut cursor = Cursor::new(&self.data[11..]);
-        // self.parse_die_entry(&mut cursor)
-        unimplemented!()
+        let debug_info = dwarf.debug_info_data();
+        let cu_data = &debug_info[self.header.offset..];
+
+        // skip over header and create cursor at start of DIE data
+        let mut cursor = Cursor::new(&cu_data[CompileUnitHeader::LEN_BYTES..]);
+        self.parse_die_entry(&mut cursor, dwarf)
     }
 
     fn children_of(&self, dwarf: &mut Dwarf, die: &DIE) -> DIEChildIterator {
@@ -788,20 +792,34 @@ impl <'a> Iterator for DIEChildIterator<'a> {
 pub struct Dwarf {
     elf: Rc<Elf>,
 
+    // compile units within the ELF file
+    compile_units: Vec<CompileUnit>,
+
     // keys are offsets within the .debug_abbrev section
     abbrev_tables: HashMap<usize, AbbrevTable>,
 }
 
 impl Dwarf {
-    pub fn new(elf: Rc<Elf>) -> Self {
-        Self { elf, abbrev_tables: HashMap::new() }
+    pub fn new(elf: Rc<Elf>) -> Result<Self, Error> {
+        let compile_units = Self::parse_compile_units(elf.as_ref())?;
+        let abbrev_tables = Self::parse_abbrev_tables(&elf, compile_units.as_ref());
+        Ok(Self { elf, compile_units, abbrev_tables })
     }
 
-    pub fn get_compile_units(&self) -> Vec<CompileUnit> {
-        Self::parse_compile_units(self.elf.as_ref()).expect("Failed to parse compile units")
+    fn parse_abbrev_tables(elf: &Elf, compile_units: &[CompileUnit]) -> HashMap<usize, AbbrevTable> {
+        let mut abbrev_tables = HashMap::new();
+        for compile_unit in compile_units.iter() {
+            let table = Self::parse_abbrev_table(elf, compile_unit.header.offset);
+            abbrev_tables.insert(compile_unit.header.offset, table);
+        }
+        abbrev_tables
     }
 
-    pub fn get_compile_unit_abbrev_table(&mut self, compile_unit: &CompileUnit) -> &AbbrevTable {
+    pub fn get_compile_units(&self) -> &[CompileUnit] {
+        self.compile_units.as_slice()
+    }
+
+    pub fn get_compile_unit_abbrev_table(&self, compile_unit: &CompileUnit) -> &AbbrevTable {
         self.get_abbrev_table(compile_unit.header.abbrev_offset)
     }
 
@@ -846,8 +864,8 @@ impl Dwarf {
         AbbrevTable { entries }
     }
 
-    fn get_abbrev_table(&mut self, offset: usize) -> &AbbrevTable {
-        self.abbrev_tables.entry(offset).or_insert_with(|| Self::parse_abbrev_table(self.elf.as_ref(), offset))
+    fn get_abbrev_table(&self, offset: usize) -> &AbbrevTable {
+        self.abbrev_tables.get(&offset).expect("No abbrev table at offset")
     }
 
     fn parse_compile_unit(cursor: &mut Cursor) -> Result<CompileUnit, Error> {
@@ -874,6 +892,14 @@ impl Dwarf {
 
         Ok(units)
     }
+
+    fn debug_info_data(&self) -> &[u8] {
+        self.expected_section_data(".debug_info")
+    }
+
+    fn expected_section_data(&self, section_name: &str) -> &[u8] {
+        self.elf.get_section_contents(section_name).expect(&format!("Failed to get {} section", section_name))
+    }
 }
 
 #[cfg(test)]
@@ -883,7 +909,7 @@ mod test {
     #[test]
     fn get_abbrev_table_test() {
         let elf = Elf::open("target/debug/hello_rsdb").expect("Failed to open ELF file");
-        let mut dwarf = Dwarf::new(elf);
+        let dwarf = Dwarf::new(elf).expect("Failed to parse DWARF");
         for cu in dwarf.get_compile_units() {
             println!("{:?}", cu);
 
