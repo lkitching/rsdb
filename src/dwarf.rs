@@ -439,40 +439,44 @@ impl Attribute {
         Ok(cursor.bytes(size).to_vec())
     }
 
-    pub fn as_reference(&self, dwarf: &mut Dwarf) -> Result<DIEEntry, Error> {
-        unimplemented!()
-        // let mut cursor = Cursor::new(self.compile_unit.data);
-        // cursor.set_position(self.attr_location);
-        //
-        // let offset = match self.attr_form {
-        //     DwarfForm::DW_FORM_ref1 => cursor.u8() as usize,
-        //     DwarfForm::DW_FORM_ref2 => cursor.u16() as usize,
-        //     DwarfForm::DW_FORM_ref4 => cursor.u32() as usize,
-        //     DwarfForm::DW_FORM_ref8 => cursor.u64() as usize,
-        //     DwarfForm::DW_FORM_udata => cursor.uleb128() as usize,
-        //     DwarfForm::DW_FORM_ref_addr => {
-        //         // WARNING: offset is stored in this compile unit's data but the offset itself is from
-        //         // the start of the .debug_info section data
-        //         let offset = cursor.u32() as usize;
-        //         let section = dwarf.elf.get_section_contents(".debug_info").expect("Failed to get .debug_info section");
-        //         let mut cursor = Cursor::new(section);
-        //         cursor.set_position(offset);
-        //
-        //         // find compile unit containing offset
-        //         // TODO: add start/end offsets to CompileUnit!
-        //         let compile_unit = dwarf.compile_units().iter().find(|cu| cu.contains_offset(offset)).expect("Failed to find compile unit at offset {}", offset);
-        //         let die_entry = compile_unit.parse_die_entry(&mut cursor);
-        //
-        //         return Ok(die_entry);
-        //     },
-        //     other => return Err(Error::from_message(format!("Invalid reference type: {:#?}", other)))
-        // };
-        //
-        // // NOTE: if we end up here the offset is an offset into the compile unit data
-        // cursor.set_position(offset);
-        //
-        // let die_entry = self.compile_unit.parse_die_entry(&mut cursor);
-        // Ok(die_entry)
+    pub fn as_reference(&self, compile_unit: &CompileUnit, dwarf: &Dwarf) -> Result<DIEEntry, Error> {
+        let mut cursor = Self::compile_unit_data_cursor(compile_unit, dwarf);
+        cursor.set_position(self.attr_location);
+
+        let offset = match self.attr_form {
+            DwarfForm::DW_FORM_ref1 => cursor.u8() as usize,
+            DwarfForm::DW_FORM_ref2 => cursor.u16() as usize,
+            DwarfForm::DW_FORM_ref4 => cursor.u32() as usize,
+            DwarfForm::DW_FORM_ref8 => cursor.u64() as usize,
+            DwarfForm::DW_FORM_udata => cursor.uleb128() as usize,
+            DwarfForm::DW_FORM_ref_addr => {
+                // WARNING: offset is stored in this compile unit's data but the offset itself is from
+                // the start of the .debug_info section data
+                let offset = cursor.u32() as usize;
+                let section = dwarf.debug_info_data();
+                let mut cursor = Cursor::new(section);
+                cursor.set_position(offset);
+
+                // find compile unit containing offset
+                // TODO: add start/end offsets to CompileUnit!
+                let compile_unit = dwarf.get_compile_units().iter().find(|cu| cu.contains_offset(offset)).expect(&format!("Failed to find compile unit at offset {}", offset));
+                let die_entry = compile_unit.parse_die_entry(&mut cursor, dwarf);
+
+                return Ok(die_entry);
+            },
+            other => return Err(Error::from_message(format!("Invalid reference type: {:#?}", other)))
+        };
+
+        // NOTE: if we end up here the offset is an offset into the compile unit data
+        // create a new cursor starting at the start of the compile unit data
+        let mut cursor = {
+            let debug_info_data = dwarf.debug_info_data();
+            Cursor::new(&debug_info_data[compile_unit.header.offset..])
+        };
+        cursor.set_position(offset);
+
+        let die_entry = compile_unit.parse_die_entry(&mut cursor, dwarf);
+        Ok(die_entry)
     }
 
     pub fn as_string(&self, dwarf: &Dwarf) -> Result<String, Error> {
@@ -606,6 +610,12 @@ impl CompileUnit {
 
     fn new(header: CompileUnitHeader) -> Self {
         Self { header }
+    }
+
+    fn contains_offset(&self, offset: usize) -> bool {
+        // TODO: check this accounts for header size weirdness!
+        let end = self.header.offset + self.header.size as usize;
+        offset >= self.header.offset && offset < end
     }
 
     fn get_abbrev_table<'b>(&self, parent: &'b mut Dwarf) -> &'b AbbrevTable {

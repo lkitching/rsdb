@@ -82,13 +82,17 @@ fn main() -> Result<(), DebuggerError> {
                     if let Ok(i) = attr.as_int(cu, &dwarf) {
                         println!("Int: {}", i)
                     }
-                    
+
                     if let Ok(offset) = attr.as_section_offset(cu, &dwarf) {
                         println!("Section offset: {}", offset)
                     }
-                    
+
                     if let Ok(block) = attr.as_block(cu, &dwarf) {
                         println!("Block: {:?}", block)
+                    }
+
+                    if let Ok(ref_die) = attr.as_reference(cu, &dwarf) {
+                        println!("Reference: {:?}", ref_die)
                     }
                 }
             }
