@@ -789,6 +789,63 @@ impl <'a> Iterator for DIEChildIterator<'a> {
     }
 }
 
+pub struct DIEEntryIterator<'a> {
+    compile_unit: CompileUnit,
+    current: DIEEntry,
+    dwarf: &'a Dwarf,
+    done: bool,
+}
+
+impl <'a> DIEEntryIterator<'a> {
+    pub fn for_compile_unit(compile_unit: CompileUnit, dwarf: &'a Dwarf) -> Self {
+        let root = compile_unit.get_root(&dwarf);
+
+        Self {
+            compile_unit,
+            current: root,
+            dwarf,
+            done: false,
+        }
+    }
+}
+
+impl <'a> Iterator for DIEEntryIterator<'a> {
+    type Item = DIEEntry;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done { return None; }
+        let debug_info = self.dwarf.debug_info_data();
+
+        // create cursor at start of compile unit data
+        // NOTE: this is because CompileUnit::get_root creates the cursor
+        // here instead of at the start of the .debug_info data so all positions
+        // are relative to there instead of the start of .debug_info
+        let mut cursor = Cursor::new(&debug_info[CompileUnitHeader::LEN_BYTES..]);
+
+        let offset = match &self.current {
+            DIEEntry::Null(offset) => {
+                // TODO: need to track depth so we know when done?
+                // move cursor to offset
+                *offset
+            },
+            DIEEntry::Entry(die) => {
+                // move cursor to next offset
+                die.next
+            }
+        };
+        cursor.set_position(offset);
+
+        if cursor.is_finished() {
+            self.done = true;
+            return None;
+        }
+        
+        let next = self.compile_unit.parse_die_entry(&mut cursor, &self.dwarf);
+        let ret = mem::replace(&mut self.current, next);
+
+        Some(ret)
+    }
+}
+
 pub struct Dwarf {
     elf: Rc<Elf>,
 
@@ -917,5 +974,17 @@ mod test {
             println!("Abbrev table:");
             println!("{:?}", abbrev_table)
         }
+    }
+
+    #[test]
+    fn parse_die_test() {
+        let elf = Elf::open("target/debug/hello_rsdb").expect("Failed to open ELF file");
+        let dwarf = Dwarf::new(elf).expect("Failed to parse DWARF");
+        let cu = &dwarf.get_compile_units()[0];
+
+        let mut it = DIEEntryIterator::for_compile_unit(cu.clone(), &dwarf);
+        let d1 = it.next();
+        let d2 = it.next();
+        let d3 = it.next();
     }
 }

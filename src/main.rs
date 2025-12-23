@@ -5,6 +5,7 @@ use libc::{signal, SIGINT, pid_t, c_int, kill, SIGSTOP, sighandler_t};
 mod debugger;
 
 use debugger::{Debugger, DebuggerError};
+use librsdb::dwarf::DIEEntryIterator;
 use librsdb::process::{self, StdoutReplacement};
 
 static mut PID: Option<pid_t> = None;
@@ -57,10 +58,13 @@ fn main() -> Result<(), DebuggerError> {
         let abbrev_table = dwarf.get_compile_unit_abbrev_table(&cu);
         println!("Abbrev table:");
         println!("{:?}", abbrev_table);
-        
-        let root_entry = cu.get_root(&dwarf);
-        println!("Root:");
-        println!("{:?}", root_entry);
+
+        //let root_entry = cu.get_root(&dwarf);
+        println!("DIE entries:");
+        let it = DIEEntryIterator::for_compile_unit(cu.clone(), &dwarf);
+        for entry in it {
+            println!("{:?}", entry);
+        }
     }
 
     Ok(())
