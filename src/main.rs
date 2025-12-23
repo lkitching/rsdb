@@ -5,7 +5,7 @@ use libc::{signal, SIGINT, pid_t, c_int, kill, SIGSTOP, sighandler_t};
 mod debugger;
 
 use debugger::{Debugger, DebuggerError};
-use librsdb::dwarf::{DIEEntry, DIEEntryIterator};
+use librsdb::dwarf::{DIEEntry, DIEEntryIterator, DwarfForm};
 use librsdb::process::{self, StdoutReplacement};
 
 static mut PID: Option<pid_t> = None;
@@ -74,6 +74,11 @@ fn main() -> Result<(), DebuggerError> {
                 for attr_spec in abbrev.attribute_specs.iter() {
                     let attr = die.get_attribute(abbrev, attr_spec.attribute).expect("Failed to get attribute");
                     println!("{:?}", attr);
+                    
+                    if attr.attr_form == DwarfForm::DW_FORM_addr {
+                        let addr = attr.as_address(cu, &dwarf).expect("Failed to get address value");
+                        println!("Address: {:?}", addr)
+                    }
                 }
             }
 

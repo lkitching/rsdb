@@ -14,7 +14,7 @@ use crate::error::Error;
 #[allow(non_camel_case_types)]
 #[repr(u64)]
 #[derive(Copy, Clone, PartialEq, Eq, Debug, FromRepr)]
-enum DwarfForm {
+pub enum DwarfForm {
     DW_FORM_addr = 0x01,
     DW_FORM_block2 = 0x03,
     DW_FORM_block4 = 0x04,
@@ -45,7 +45,7 @@ enum DwarfForm {
 #[allow(non_camel_case_types)]
 #[repr(u64)]
 #[derive(Copy, Clone, PartialEq, Eq, Debug, FromRepr)]
-enum DwarfAttribute {
+pub enum DwarfAttribute {
     DW_AT_sibling = 0x01,
     DW_AT_location = 0x02,
     DW_AT_name = 0x03,
@@ -370,26 +370,34 @@ impl <'a> AddAssign<usize> for Cursor<'a> {
 #[derive(Clone, Debug)]
 pub struct Attribute {
     attr_type: u64,
-    attr_form: DwarfForm,
+    pub attr_form: DwarfForm,
     attr_location: usize
+    // TODO: add compile unit offset member?
 }
 
 impl Attribute {
-    fn as_address(&self, dwarf: &Dwarf) -> Result<FileAddress, Error> {
-        unimplemented!()
-        // match self.attr_form {
-        //     DwarfForm::DW_FORM_addr => {
-        //         let mut cursor = Cursor::new(self.compile_unit.data);
-        //         cursor.set_position(self.attr_location);
-        //         let addr = cursor.u64();
-        //         let file_addr = FileAddress::new(dwarf.elf.clone(), addr as usize);
-        //         Ok(file_addr)
-        //     },
-        //     _ => Err(Error::from_message(String::from("Invalid address type")))
-        // }
+    fn compile_unit_data_cursor<'a, 'b>(compile_unit: &'b CompileUnit, dwarf: &'a Dwarf) -> Cursor<'a> {
+        let debug_info_data = dwarf.debug_info_data();
+        let cu_bytes = &debug_info_data[compile_unit.header.offset..];
+        // cu data starts after compile unit header
+        Cursor::new(&cu_bytes[CompileUnitHeader::LEN_BYTES..])
     }
 
-    fn as_section_offset(&self) -> Result<u32, Error> {
+    pub fn as_address(&self, compile_unit: &CompileUnit, dwarf: &Dwarf) -> Result<FileAddress, Error> {
+        match self.attr_form {
+            DwarfForm::DW_FORM_addr => {
+                //let mut cursor = Cursor::new(self.compile_unit.data);
+                let mut cursor = Self::compile_unit_data_cursor(compile_unit, dwarf);
+                cursor.set_position(self.attr_location);
+                let addr = cursor.u64();
+                let file_addr = FileAddress::new(dwarf.elf.clone(), addr as usize);
+                Ok(file_addr)
+            },
+            _ => Err(Error::from_message(String::from("Invalid address type")))
+        }
+    }
+
+    pub fn as_section_offset(&self) -> Result<u32, Error> {
         unimplemented!()
         // match self.attr_form {
         //     DwarfForm::DW_FORM_sec_offset => {
@@ -402,7 +410,7 @@ impl Attribute {
         // }
     }
 
-    fn as_int(&self) -> Result<u64, Error> {
+    pub fn as_int(&self) -> Result<u64, Error> {
         unimplemented!()
         // let mut cursor = Cursor::new(self.compile_unit.data);
         // cursor.set_position(self.attr_location);
@@ -417,7 +425,7 @@ impl Attribute {
         // }
     }
 
-    fn as_block(&self) -> Result<Vec<u8>, Error> {
+    pub fn as_block(&self) -> Result<Vec<u8>, Error> {
         unimplemented!()
         // let mut cursor = Cursor::new(self.compile_unit.data);
         // cursor.set_position(self.attr_location);
@@ -434,7 +442,7 @@ impl Attribute {
         // Ok(cursor.bytes(size).to_vec())
     }
 
-    fn as_reference(&self, dwarf: &mut Dwarf) -> Result<DIEEntry, Error> {
+    pub fn as_reference(&self, dwarf: &mut Dwarf) -> Result<DIEEntry, Error> {
         unimplemented!()
         // let mut cursor = Cursor::new(self.compile_unit.data);
         // cursor.set_position(self.attr_location);
@@ -470,7 +478,7 @@ impl Attribute {
         // Ok(die_entry)
     }
 
-    fn as_string(&self, dwarf: &Dwarf) -> Result<String, Error> {
+    pub fn as_string(&self, dwarf: &Dwarf) -> Result<String, Error> {
         unimplemented!()
         // let mut cursor = Cursor::new(self.compile_unit.data);
         // match self.attr_form {
