@@ -86,6 +86,10 @@ fn main() -> Result<(), DebuggerError> {
                     if let Ok(offset) = attr.as_section_offset(cu, &dwarf) {
                         println!("Section offset: {}", offset)
                     }
+                    
+                    if let Ok(block) = attr.as_block(cu, &dwarf) {
+                        println!("Block: {:?}", block)
+                    }
                 }
             }
 

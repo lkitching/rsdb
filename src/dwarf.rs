@@ -423,21 +423,20 @@ impl Attribute {
         }
     }
 
-    pub fn as_block(&self) -> Result<Vec<u8>, Error> {
-        unimplemented!()
-        // let mut cursor = Cursor::new(self.compile_unit.data);
-        // cursor.set_position(self.attr_location);
-        //
-        // let size = match self.attr_form {
-        //     DwarfForm::DW_FORM_block1 => cursor.u8() as usize,
-        //     DwarfForm::DW_FORM_block2 => cursor.u16() as usize,
-        //     DwarfForm::DW_FORM_block4 => cursor.u32() as usize,
-        //     DwarfForm::DW_FORM_block => cursor.uleb128() as usize,
-        //     _ => return Err(Error::from_message(String::from("Invalid block type")))
-        // };
-        //
-        // // TODO: can return slice?
-        // Ok(cursor.bytes(size).to_vec())
+    pub fn as_block(&self, compile_unit: &CompileUnit, dwarf: &Dwarf) -> Result<Vec<u8>, Error> {
+        let mut cursor = Self::compile_unit_data_cursor(compile_unit, dwarf);
+        cursor.set_position(self.attr_location);
+
+        let size = match self.attr_form {
+            DwarfForm::DW_FORM_block1 => cursor.u8() as usize,
+            DwarfForm::DW_FORM_block2 => cursor.u16() as usize,
+            DwarfForm::DW_FORM_block4 => cursor.u32() as usize,
+            DwarfForm::DW_FORM_block => cursor.uleb128() as usize,
+            _ => return Err(Error::from_message(String::from("Invalid block type")))
+        };
+
+        // TODO: can return slice?
+        Ok(cursor.bytes(size).to_vec())
     }
 
     pub fn as_reference(&self, dwarf: &mut Dwarf) -> Result<DIEEntry, Error> {
