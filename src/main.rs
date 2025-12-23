@@ -5,7 +5,7 @@ use libc::{signal, SIGINT, pid_t, c_int, kill, SIGSTOP, sighandler_t};
 mod debugger;
 
 use debugger::{Debugger, DebuggerError};
-use librsdb::dwarf::DIEEntryIterator;
+use librsdb::dwarf::{DIEEntry, DIEEntryIterator};
 use librsdb::process::{self, StdoutReplacement};
 
 static mut PID: Option<pid_t> = None;
@@ -64,6 +64,20 @@ fn main() -> Result<(), DebuggerError> {
         let it = DIEEntryIterator::for_compile_unit(cu.clone(), &dwarf);
         for entry in it {
             println!("{:?}", entry);
+
+            if let DIEEntry::Entry(die) = entry {
+                // get abbrev for DIE
+                let abbrev = abbrev_table.get_by_code(die.abbrev_code).expect("Failed to get DIE abbrev");
+
+                println!("Has children? {}", abbrev.has_children);
+                println!("Attributes:");
+                for attr_spec in abbrev.attribute_specs.iter() {
+                    let attr = die.get_attribute(abbrev, attr_spec.attribute).expect("Failed to get attribute");
+                    println!("{:?}", attr);
+                }
+            }
+
+            println!()
         }
     }
 

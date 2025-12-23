@@ -148,7 +148,7 @@ enum DwarfAttribute {
 
 #[derive(Copy, Clone, Debug)]
 pub struct AttributeSpec {
-    attribute: u64,
+    pub attribute: u64,
     form: u64
 }
 
@@ -156,8 +156,8 @@ pub struct AttributeSpec {
 pub struct Abbrev {
     code: NonZeroU64,
     tag: u64,
-    has_children: bool,
-    attribute_specs: Vec<AttributeSpec>
+    pub has_children: bool,
+    pub attribute_specs: Vec<AttributeSpec>
 }
 
 #[derive(Debug)]
@@ -166,7 +166,7 @@ pub struct AbbrevTable {
 }
 
 impl AbbrevTable {
-    fn get_by_code(&self, code: NonZeroU64) -> Option<&Abbrev> {
+    pub fn get_by_code(&self, code: NonZeroU64) -> Option<&Abbrev> {
         self.entries.get(&code)
     }
 }
@@ -367,7 +367,8 @@ impl <'a> AddAssign<usize> for Cursor<'a> {
     }
 }
 
-struct Attribute {
+#[derive(Clone, Debug)]
+pub struct Attribute {
     attr_type: u64,
     attr_form: DwarfForm,
     attr_location: usize
@@ -494,7 +495,7 @@ impl Attribute {
 pub struct DIE {
     position: usize,
     next: usize,
-    abbrev_code: NonZeroU64,
+    pub abbrev_code: NonZeroU64,
     attribute_locations: Vec<usize>
 }
 
@@ -504,25 +505,21 @@ impl DIE {
     //     abbrev.attribute_specs.iter().find(|spec| spec.attribute == attribute).is_some()
     // }
 
-    fn get_attribute(&self, compile_unit: CompileUnit, attribute: u64) -> Option<Attribute> {
-        unimplemented!()
-        // let abbrev = compile_unit.get_abbrev_table().get_by_code(self.abbrev_code).expect("Failed to get abbrev");
-        //
-        // for attr_index in 0..abbrev.attribute_specs.len() {
-        //
-        //     let attr_spec = &abbrev.attribute_specs[attr_index];
-        //     if attr_spec.attribute == attribute {
-        //         let attr = Attribute {
-        //             attr_type: attr_spec.attribute,
-        //             attr_form: attr_spec.form,
-        //             attr_location: self.attribute_locations[attr_index]
-        //         };
-        //         return Some(attr)
-        //     }
-        // }
-        //
-        // // attribute not found
-        // None
+    pub fn get_attribute(&self, abbrev: &Abbrev, attribute: u64) -> Option<Attribute> {
+        for attr_index in 0..abbrev.attribute_specs.len() {
+            let attr_spec = &abbrev.attribute_specs[attr_index];
+            if attr_spec.attribute == attribute {
+                let attr = Attribute {
+                    attr_type: attr_spec.attribute,
+                    attr_form: DwarfForm::from_repr(attr_spec.form).expect("Failed to convert DWARF form"),
+                    attr_location: self.attribute_locations[attr_index]
+                };
+                return Some(attr)
+            }
+        }
+
+        // attribute not found
+        None
     }
 }
 
@@ -838,7 +835,7 @@ impl <'a> Iterator for DIEEntryIterator<'a> {
             self.done = true;
             return None;
         }
-        
+
         let next = self.compile_unit.parse_die_entry(&mut cursor, &self.dwarf);
         let ret = mem::replace(&mut self.current, next);
 
