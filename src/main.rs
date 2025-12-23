@@ -74,10 +74,13 @@ fn main() -> Result<(), DebuggerError> {
                 for attr_spec in abbrev.attribute_specs.iter() {
                     let attr = die.get_attribute(abbrev, attr_spec.attribute).expect("Failed to get attribute");
                     println!("{:?}", attr);
-                    
-                    if attr.attr_form == DwarfForm::DW_FORM_addr {
-                        let addr = attr.as_address(cu, &dwarf).expect("Failed to get address value");
+
+                    if let Ok(addr) = attr.as_address(cu, &dwarf) {
                         println!("Address: {:?}", addr)
+                    }
+
+                    if let Ok(i) = attr.as_int(cu, &dwarf) {
+                        println!("Int: {}", i)
                     }
                 }
             }

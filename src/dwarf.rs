@@ -410,19 +410,18 @@ impl Attribute {
         // }
     }
 
-    pub fn as_int(&self) -> Result<u64, Error> {
-        unimplemented!()
-        // let mut cursor = Cursor::new(self.compile_unit.data);
-        // cursor.set_position(self.attr_location);
-        //
-        // match self.attr_form {
-        //     DwarfForm::DW_FORM_data1 => Ok(cursor.u8() as u64),
-        //     DwarfForm::DW_FORM_data2 => Ok(cursor.u16() as u64),
-        //     DwarfForm::DW_FORM_data4 => Ok(cursor.u32() as u64),
-        //     DwarfForm::DW_FORM_data8 => Ok(cursor.u64()),
-        //     DwarfForm::DW_FORM_udata => Ok(cursor.uleb128()),
-        //     _ => Err(Error::from_message(String::from("Invalid integer type")))
-        // }
+    pub fn as_int(&self, compile_unit: &CompileUnit, dwarf: &Dwarf) -> Result<u64, Error> {
+        let mut cursor = Self::compile_unit_data_cursor(compile_unit, dwarf);
+        cursor.set_position(self.attr_location);
+
+        match self.attr_form {
+            DwarfForm::DW_FORM_data1 => Ok(cursor.u8() as u64),
+            DwarfForm::DW_FORM_data2 => Ok(cursor.u16() as u64),
+            DwarfForm::DW_FORM_data4 => Ok(cursor.u32() as u64),
+            DwarfForm::DW_FORM_data8 => Ok(cursor.u64()),
+            DwarfForm::DW_FORM_udata => Ok(cursor.uleb128()),
+            _ => Err(Error::from_message(String::from("Invalid integer type")))
+        }
     }
 
     pub fn as_block(&self) -> Result<Vec<u8>, Error> {
