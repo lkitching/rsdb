@@ -397,17 +397,16 @@ impl Attribute {
         }
     }
 
-    pub fn as_section_offset(&self) -> Result<u32, Error> {
-        unimplemented!()
-        // match self.attr_form {
-        //     DwarfForm::DW_FORM_sec_offset => {
-        //         let mut cursor = Cursor::new(self.compile_unit.data);
-        //         cursor.set_position(self.attr_location);
-        //         let offset = cursor.u32();
-        //         Ok(offset)
-        //     },
-        //     _ => Err(Error::from_message(String::from("Invalid offset type")))
-        // }
+    pub fn as_section_offset(&self, compile_unit: &CompileUnit, dwarf: &Dwarf) -> Result<u32, Error> {
+        match self.attr_form {
+            DwarfForm::DW_FORM_sec_offset => {
+                let mut cursor = Self::compile_unit_data_cursor(compile_unit, dwarf);
+                cursor.set_position(self.attr_location);
+                let offset = cursor.u32();
+                Ok(offset)
+            },
+            _ => Err(Error::from_message(String::from("Invalid offset type")))
+        }
     }
 
     pub fn as_int(&self, compile_unit: &CompileUnit, dwarf: &Dwarf) -> Result<u64, Error> {
