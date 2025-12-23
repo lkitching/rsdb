@@ -94,6 +94,10 @@ fn main() -> Result<(), DebuggerError> {
                     if let Ok(ref_die) = attr.as_reference(cu, &dwarf) {
                         println!("Reference: {:?}", ref_die)
                     }
+                    
+                    if let Ok(s) = attr.as_string(cu, &dwarf) {
+                        println!("String: {}", s)
+                    }
                 }
             }
 

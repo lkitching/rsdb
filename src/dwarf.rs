@@ -221,11 +221,11 @@ impl <'a> Cursor<'a> {
             }
         }
 
-        let cs = CStr::from_bytes_with_nul(&self.data[self.position..end]).expect("Failed to create CStr");
+        let cs = CStr::from_bytes_with_nul(&self.data[self.position..end+1]).expect("Failed to create CStr");
         let s = cs.to_string_lossy().to_string();
 
         // position cursor past end of string
-        self.position = end + 1;
+        self.position = end + 2;
 
         s
     }
@@ -479,24 +479,25 @@ impl Attribute {
         Ok(die_entry)
     }
 
-    pub fn as_string(&self, dwarf: &Dwarf) -> Result<String, Error> {
-        unimplemented!()
-        // let mut cursor = Cursor::new(self.compile_unit.data);
-        // match self.attr_form {
-        //     DwarfForm::DW_FORM_string => {
-        //         let s = cursor.string();
-        //         Ok(s)
-        //     },
-        //     DwarfForm::DW_FORM_strp => {
-        //         let offset = cursor.u32() as usize;
-        //         let str_table = dwarf.elf.get_section_contents(".debug_str").expect("Failed to get .debug_str section");
-        //         let mut cursor = Cursor::new(str_table);
-        //         cursor.set_position(offset);
-        //         let s = cursor.string();
-        //         Ok(s)
-        //     },
-        //     other => Err(Error::from_message(format!("Invalid string type {:#?}", other)))
-        // }
+    pub fn as_string(&self, compile_unit: &CompileUnit, dwarf: &Dwarf) -> Result<String, Error> {
+        let mut cursor = Self::compile_unit_data_cursor(compile_unit, dwarf);
+        cursor.set_position(self.attr_location);
+
+        match self.attr_form {
+            DwarfForm::DW_FORM_string => {
+                let s = cursor.string();
+                Ok(s)
+            },
+            DwarfForm::DW_FORM_strp => {
+                let offset = cursor.u32() as usize;
+                let str_table = dwarf.debug_str_data();
+                let mut cursor = Cursor::new(str_table);
+                cursor.set_position(offset);
+                let s = cursor.string();
+                Ok(s)
+            },
+            other => Err(Error::from_message(format!("Invalid string type {:#?}", other)))
+        }
     }
 }
 
@@ -964,6 +965,10 @@ impl Dwarf {
 
     fn debug_info_data(&self) -> &[u8] {
         self.expected_section_data(".debug_info")
+    }
+
+    fn debug_str_data(&self) -> &[u8] {
+        self.expected_section_data(".debug_str")
     }
 
     fn expected_section_data(&self, section_name: &str) -> &[u8] {
