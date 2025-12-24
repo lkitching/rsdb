@@ -371,7 +371,7 @@ impl <'a> AddAssign<usize> for Cursor<'a> {
 pub struct Attribute {
     attr_type: u64,
     pub attr_form: DwarfForm,
-    
+
     // offset of this attribute value within the .debug_info section
     attr_location: usize
 }
@@ -603,8 +603,7 @@ impl CompileUnit {
     }
 
     fn contains_offset(&self, offset: usize) -> bool {
-        // TODO: check this accounts for header size weirdness!
-        let end = self.header.offset + self.header.size as usize;
+        let end = self.header.offset + self.header.compile_unit_len() as usize;
         offset >= self.header.offset && offset < end
     }
 
