@@ -605,10 +605,6 @@ pub struct CompileUnit {
 }
 
 impl CompileUnit {
-    // fn new(data: &'a [u8], abbrev_offset: usize) -> Self {
-    //     Self { data, abbrev_offset }
-    // }
-
     fn new(header: CompileUnitHeader) -> Self {
         Self { header }
     }
@@ -617,15 +613,6 @@ impl CompileUnit {
         // TODO: check this accounts for header size weirdness!
         let end = self.header.offset + self.header.size as usize;
         offset >= self.header.offset && offset < end
-    }
-
-    fn get_abbrev_table<'b>(&self, parent: &'b mut Dwarf) -> &'b AbbrevTable {
-        //parent.get_abbrev_table(self.abbrev_offset)
-        unimplemented!()
-    }
-
-    fn abbreviation_table(&self) -> &AbbrevTable {
-        unimplemented!()
     }
 
     fn parse_die_entry(&self, cursor: &mut Cursor, dwarf: &Dwarf) -> DIEEntry {
