@@ -149,7 +149,7 @@ pub enum DwarfAttribute {
 #[derive(Copy, Clone, Debug)]
 pub struct AttributeSpec {
     pub attribute: u64,
-    form: u64
+    form: DwarfForm,
 }
 
 #[derive(Clone, Debug)]
@@ -521,7 +521,7 @@ impl DIE {
             if attr_spec.attribute == attribute {
                 let attr = Attribute {
                     attr_type: attr_spec.attribute,
-                    attr_form: DwarfForm::from_repr(attr_spec.form).expect("Failed to convert DWARF form"),
+                    attr_form: attr_spec.form,
                     attr_location: self.attribute_locations[attr_index]
                 };
                 return Some(attr)
@@ -633,9 +633,7 @@ impl CompileUnit {
                 let mut attribute_locations = Vec::with_capacity(abbrev.attribute_specs.len());
                 for attr in abbrev.attribute_specs.iter() {
                     attribute_locations.push(cursor.position);
-                    // TODO: parse on construction!
-                    let form = DwarfForm::from_repr(attr.form).expect("Invalid dwarf form");
-                    cursor.skip_form(form)
+                    cursor.skip_form(attr.form)
                 }
 
                 // next DIE should be at current cursor position
@@ -908,6 +906,7 @@ impl Dwarf {
                         if attribute == 0 {
                             break;
                         } else {
+                            let form = DwarfForm::from_repr(form).expect("Invalid DWARF form");
                             attribute_specs.push(AttributeSpec { attribute, form })
                         }
                     }
