@@ -371,24 +371,22 @@ impl <'a> AddAssign<usize> for Cursor<'a> {
 pub struct Attribute {
     attr_type: u64,
     pub attr_form: DwarfForm,
+    
+    // offset of this attribute value within the .debug_info section
     attr_location: usize
-    // TODO: add compile unit offset member?
 }
 
 impl Attribute {
-    fn compile_unit_data_cursor<'a, 'b>(compile_unit: &'b CompileUnit, dwarf: &'a Dwarf) -> Cursor<'a> {
-        let debug_info_data = dwarf.debug_info_data();
-        let cu_bytes = &debug_info_data[compile_unit.header.offset..];
-        // cu data starts after compile unit header
-        Cursor::new(&cu_bytes[CompileUnitHeader::LEN_BYTES..])
+    fn data_cursor<'a>(&self, dwarf: &'a Dwarf) -> Cursor<'a> {
+        let mut cursor = dwarf.debug_info_cursor();
+        cursor.set_position(self.attr_location);
+        cursor
     }
 
-    pub fn as_address(&self, compile_unit: &CompileUnit, dwarf: &Dwarf) -> Result<FileAddress, Error> {
+    pub fn as_address(&self, dwarf: &Dwarf) -> Result<FileAddress, Error> {
         match self.attr_form {
             DwarfForm::DW_FORM_addr => {
-                //let mut cursor = Cursor::new(self.compile_unit.data);
-                let mut cursor = Self::compile_unit_data_cursor(compile_unit, dwarf);
-                cursor.set_position(self.attr_location);
+                let mut cursor = self.data_cursor(dwarf);
                 let addr = cursor.u64();
                 let file_addr = FileAddress::new(dwarf.elf.clone(), addr as usize);
                 Ok(file_addr)
@@ -397,11 +395,10 @@ impl Attribute {
         }
     }
 
-    pub fn as_section_offset(&self, compile_unit: &CompileUnit, dwarf: &Dwarf) -> Result<u32, Error> {
+    pub fn as_section_offset(&self, dwarf: &Dwarf) -> Result<u32, Error> {
         match self.attr_form {
             DwarfForm::DW_FORM_sec_offset => {
-                let mut cursor = Self::compile_unit_data_cursor(compile_unit, dwarf);
-                cursor.set_position(self.attr_location);
+                let mut cursor = self.data_cursor(dwarf);
                 let offset = cursor.u32();
                 Ok(offset)
             },
@@ -409,9 +406,8 @@ impl Attribute {
         }
     }
 
-    pub fn as_int(&self, compile_unit: &CompileUnit, dwarf: &Dwarf) -> Result<u64, Error> {
-        let mut cursor = Self::compile_unit_data_cursor(compile_unit, dwarf);
-        cursor.set_position(self.attr_location);
+    pub fn as_int(&self, dwarf: &Dwarf) -> Result<u64, Error> {
+        let mut cursor = self.data_cursor(dwarf);
 
         match self.attr_form {
             DwarfForm::DW_FORM_data1 => Ok(cursor.u8() as u64),
@@ -423,9 +419,8 @@ impl Attribute {
         }
     }
 
-    pub fn as_block(&self, compile_unit: &CompileUnit, dwarf: &Dwarf) -> Result<Vec<u8>, Error> {
-        let mut cursor = Self::compile_unit_data_cursor(compile_unit, dwarf);
-        cursor.set_position(self.attr_location);
+    pub fn as_block(&self, dwarf: &Dwarf) -> Result<Vec<u8>, Error> {
+        let mut cursor = self.data_cursor(dwarf);
 
         let size = match self.attr_form {
             DwarfForm::DW_FORM_block1 => cursor.u8() as usize,
@@ -440,8 +435,7 @@ impl Attribute {
     }
 
     pub fn as_reference(&self, compile_unit: &CompileUnit, dwarf: &Dwarf) -> Result<DIEEntry, Error> {
-        let mut cursor = Self::compile_unit_data_cursor(compile_unit, dwarf);
-        cursor.set_position(self.attr_location);
+        let mut cursor = self.data_cursor(dwarf);
 
         let offset = match self.attr_form {
             DwarfForm::DW_FORM_ref1 => cursor.u8() as usize,
@@ -479,9 +473,8 @@ impl Attribute {
         Ok(die_entry)
     }
 
-    pub fn as_string(&self, compile_unit: &CompileUnit, dwarf: &Dwarf) -> Result<String, Error> {
-        let mut cursor = Self::compile_unit_data_cursor(compile_unit, dwarf);
-        cursor.set_position(self.attr_location);
+    pub fn as_string(&self, dwarf: &Dwarf) -> Result<String, Error> {
+        let mut cursor = self.data_cursor(dwarf);
 
         match self.attr_form {
             DwarfForm::DW_FORM_string => {
@@ -645,13 +638,11 @@ impl CompileUnit {
     }
 
     pub fn get_root(&self, dwarf: &Dwarf) -> DIEEntry {
-        // NOTE: data contains entire compile unit data including the 11-byte header
-        // create cursor for unit DIE data
-        let debug_info = dwarf.debug_info_data();
-        let cu_data = &debug_info[self.header.offset..];
+        // get cursor and set position to the start of the DIE data for this compile unit
+        // data starts immediately after header which has a fixed length
+        let mut cursor = dwarf.debug_info_cursor();
+        cursor.set_position(self.header.offset + CompileUnitHeader::LEN_BYTES);
 
-        // skip over header and create cursor at start of DIE data
-        let mut cursor = Cursor::new(&cu_data[CompileUnitHeader::LEN_BYTES..]);
         self.parse_die_entry(&mut cursor, dwarf)
     }
 
@@ -811,13 +802,8 @@ impl <'a> Iterator for DIEEntryIterator<'a> {
     type Item = DIEEntry;
     fn next(&mut self) -> Option<Self::Item> {
         if self.done { return None; }
-        let debug_info = self.dwarf.debug_info_data();
 
-        // create cursor at start of compile unit data
-        // NOTE: this is because CompileUnit::get_root creates the cursor
-        // here instead of at the start of the .debug_info data so all positions
-        // are relative to there instead of the start of .debug_info
-        let mut cursor = Cursor::new(&debug_info[CompileUnitHeader::LEN_BYTES..]);
+        let mut cursor = self.dwarf.debug_info_cursor();
 
         let offset = match &self.current {
             DIEEntry::Null(offset) => {
@@ -951,6 +937,11 @@ impl Dwarf {
 
     fn debug_info_data(&self) -> &[u8] {
         self.expected_section_data(".debug_info")
+    }
+
+    fn debug_info_cursor(&self) -> Cursor {
+        let data = self.debug_info_data();
+        Cursor::new(data)
     }
 
     fn debug_str_data(&self) -> &[u8] {

@@ -75,19 +75,19 @@ fn main() -> Result<(), DebuggerError> {
                     let attr = die.get_attribute(abbrev, attr_spec.attribute).expect("Failed to get attribute");
                     println!("{:?}", attr);
 
-                    if let Ok(addr) = attr.as_address(cu, &dwarf) {
+                    if let Ok(addr) = attr.as_address(&dwarf) {
                         println!("Address: {:?}", addr)
                     }
 
-                    if let Ok(i) = attr.as_int(cu, &dwarf) {
+                    if let Ok(i) = attr.as_int(&dwarf) {
                         println!("Int: {}", i)
                     }
 
-                    if let Ok(offset) = attr.as_section_offset(cu, &dwarf) {
+                    if let Ok(offset) = attr.as_section_offset(&dwarf) {
                         println!("Section offset: {}", offset)
                     }
 
-                    if let Ok(block) = attr.as_block(cu, &dwarf) {
+                    if let Ok(block) = attr.as_block(&dwarf) {
                         println!("Block: {:?}", block)
                     }
 
@@ -95,7 +95,7 @@ fn main() -> Result<(), DebuggerError> {
                         println!("Reference: {:?}", ref_die)
                     }
                     
-                    if let Ok(s) = attr.as_string(cu, &dwarf) {
+                    if let Ok(s) = attr.as_string(&dwarf) {
                         println!("String: {}", s)
                     }
                 }
