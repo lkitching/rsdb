@@ -70,6 +70,15 @@ fn main() -> Result<(), DebuggerError> {
                 let abbrev = abbrev_table.get_by_code(die.abbrev_code).expect("Failed to get DIE abbrev");
 
                 println!("Has children? {}", abbrev.has_children);
+
+                if let Ok(low) = die.low_pc(&abbrev, &dwarf) {
+                    println!("Low PC: {:?}", low);
+
+                    if let Ok(high) = die.high_pc(&abbrev, &dwarf) {
+                        println!("High PC: {:?}", high);
+                    }
+                }
+
                 println!("Attributes:");
                 for attr_spec in abbrev.attribute_specs.iter() {
                     let attr = die.get_attribute(abbrev, attr_spec.attribute).expect("Failed to get attribute");

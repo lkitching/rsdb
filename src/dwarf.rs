@@ -508,6 +508,29 @@ impl DIE {
     //     abbrev.attribute_specs.iter().find(|spec| spec.attribute == attribute).is_some()
     // }
 
+    pub fn low_pc(&self, abbrev: &Abbrev, dwarf: &Dwarf) -> Result<FileAddress, Error> {
+        let attr = self.get_attribute(abbrev, DwarfAttribute::DW_AT_low_pc as u64)
+            .ok_or_else(|| Error::from_message("No low pc attribute found on DIE".to_owned()))?;
+        attr.as_address(dwarf)
+    }
+
+    pub fn high_pc(&self, abbrev: &Abbrev, dwarf: &Dwarf) -> Result<FileAddress, Error> {
+        let attr = self.get_attribute(abbrev, DwarfAttribute::DW_AT_high_pc as u64)
+            .ok_or_else(|| Error::from_message("No high pc attribute found on DIE".to_owned()))?;
+
+        if attr.attr_form == DwarfForm::DW_FORM_addr {
+            // direct virtual address
+            attr.as_address(dwarf)
+        } else {
+            // offset from low_pc attribute
+            // TODO: check int form!
+            let offset = attr.as_int(dwarf)? as isize;
+            let low_pc = self.low_pc(abbrev, dwarf)?;
+            let high_pc = low_pc + offset;
+            Ok(high_pc)
+        }
+    }
+
     pub fn get_attribute(&self, abbrev: &Abbrev, attribute: u64) -> Option<Attribute> {
         for attr_index in 0..abbrev.attribute_specs.len() {
             let attr_spec = &abbrev.attribute_specs[attr_index];
