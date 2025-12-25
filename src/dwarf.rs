@@ -367,6 +367,64 @@ impl <'a> AddAssign<usize> for Cursor<'a> {
     }
 }
 
+pub struct RangeListEntry {
+    pub low: FileAddress,
+    pub high: FileAddress,
+}
+
+impl RangeListEntry {
+    pub fn contains(&self, addr: &FileAddress) -> bool {
+        addr >= &self.low && addr < &self.high
+    }
+}
+
+pub struct RangeListIterator<'a> {
+    dwarf: &'a Dwarf,
+    cursor: Cursor<'a>,
+    base_address: Option<FileAddress>,
+}
+
+impl <'a> RangeListIterator<'a> {
+    const BASE_ADDRESS_FLAG: u64 = 0xffffffffffffffff;
+}
+
+impl <'a> Iterator for RangeListIterator<'a> {
+    type Item = RangeListEntry;
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.cursor.is_finished() {
+                return None;
+            }
+
+            let low = self.cursor.u64();
+            let hi = self.cursor.u64();
+
+            // list is terminated by a pair of 0 entries
+            if low == 0 && hi == 0 {
+                return None;
+            } else if low == Self::BASE_ADDRESS_FLAG {
+                // if low is set to the base address flag then hi is the new base address
+                self.base_address = Some(FileAddress::new(Rc::clone(&self.dwarf.elf), hi as usize));
+            } else {
+                match self.base_address {
+                    None => {
+                        // no base address yet found
+                        panic!("Not encountered a base address by position {}", self.cursor.position);
+                    },
+                    Some(ref base_addr) => {
+                        let low_addr = base_addr.clone() + low as isize;
+                        let high_addr = base_addr.clone() + hi as isize;
+                        return Some(RangeListEntry {
+                            low: low_addr,
+                            high: high_addr,
+                        })
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Attribute {
     attr_type: u64,
@@ -491,6 +549,32 @@ impl Attribute {
             },
             other => Err(Error::from_message(format!("Invalid string type {:#?}", other)))
         }
+    }
+
+    pub fn as_range_list<'a>(&self, compile_unit: &'a CompileUnit, abbrev: &'a Abbrev, dwarf: &'a Dwarf) -> Result<RangeListIterator<'a>, Error> {
+        let offset = self.as_section_offset(&dwarf)?;
+
+        // get root DIE of compile unit for this attribute
+        // if it contains a low_pc attribute, use that as the initial base address
+        let root_die = compile_unit.get_root(dwarf);
+        let cu_low_addr = match root_die {
+            DIEEntry::Entry(die) => {
+                die.low_pc(abbrev, dwarf).ok()
+            },
+            DIEEntry::Null(_) => None,
+        };
+
+        let debug_ranges_data = dwarf.debug_ranges_data();
+        let mut cursor = Cursor::new(debug_ranges_data);
+        cursor.set_position(offset as usize);
+
+        let it = RangeListIterator {
+            dwarf,
+            cursor,
+            base_address: cu_low_addr,
+        };
+
+        Ok(it)
     }
 }
 
@@ -959,6 +1043,10 @@ impl Dwarf {
 
     fn debug_info_data(&self) -> &[u8] {
         self.expected_section_data(".debug_info")
+    }
+
+    fn debug_ranges_data(&self) -> &[u8] {
+        self.expected_section_data(".debug_ranges")
     }
 
     fn debug_info_cursor(&self) -> Cursor {
