@@ -559,7 +559,7 @@ impl Attribute {
         let root_die = compile_unit.get_root(dwarf);
         let cu_low_addr = match root_die {
             DIEEntry::Entry(die) => {
-                die.low_pc(abbrev, dwarf).ok()
+                die.low_pc(compile_unit, dwarf).ok()
             },
             DIEEntry::Null(_) => None,
         };
@@ -587,18 +587,57 @@ pub struct DIE {
 }
 
 impl DIE {
-    // fn contains(&self, compile_unit: &CompileUnit, attribute: u64) -> bool {
-    //     let abbrev = compile_unit.get_abbrev_table().get_by_code(self.abbrev_code).expect("Failed to get abbrev");
-    //     abbrev.attribute_specs.iter().find(|spec| spec.attribute == attribute).is_some()
-    // }
+    pub fn contains_address(&self, compile_unit: &CompileUnit, dwarf: &Dwarf, addr: &FileAddress) -> bool {
+        if ! Rc::ptr_eq(addr.elf_ptr(), &dwarf.elf) { return false; }
 
-    pub fn low_pc(&self, abbrev: &Abbrev, dwarf: &Dwarf) -> Result<FileAddress, Error> {
+        let abbrev = dwarf.get_compile_unit_abbrev_table(compile_unit).get_by_code(self.abbrev_code).expect("Failed to find abbrev");
+
+        // NOTE: this should go first since the high/low pc methods iterate the range list if one exists
+        if let Some(range_attr) = self.get_attribute(abbrev, DwarfAttribute::DW_AT_ranges as u64) {
+            let mut range_list = range_attr.as_range_list(compile_unit, abbrev, dwarf).expect("Failed to get range list");
+            return range_list.any(|rl| rl.contains(addr));
+        }
+
+        if let Some(low_addr_attr) = self.get_attribute(abbrev, DwarfAttribute::DW_AT_low_pc as u64) {
+            let low_addr = low_addr_attr.as_address(dwarf).expect("Expected low address");
+
+            // high_pc attribute should always exist?
+            if let Some(high_addr_attr) = self.get_attribute(abbrev, DwarfAttribute::DW_AT_high_pc as u64) {
+                let high_addr = high_addr_attr.as_address(dwarf).expect("Expected high address");
+                return &low_addr <= addr && &high_addr < addr;
+            }
+        }
+
+        false
+    }
+
+    pub fn low_pc(&self, compile_unit: &CompileUnit, dwarf: &Dwarf) -> Result<FileAddress, Error> {
+        let abbrev = dwarf.get_compile_unit_abbrev_table(compile_unit).get_by_code(self.abbrev_code).expect("Failed to find abbrev");
+
+        if let Some(range_attr) = self.get_attribute(abbrev, DwarfAttribute::DW_AT_ranges as u64) {
+            let mut range_list = range_attr.as_range_list(compile_unit, abbrev, dwarf).expect("Failed to get range list");
+
+            // low address is low address of first entry (which is expected to exist)
+            let low_addr = range_list.next().expect("Expected non-empty range list").low;
+            return Ok(low_addr)
+        }
+
         let attr = self.get_attribute(abbrev, DwarfAttribute::DW_AT_low_pc as u64)
             .ok_or_else(|| Error::from_message("No low pc attribute found on DIE".to_owned()))?;
         attr.as_address(dwarf)
     }
 
-    pub fn high_pc(&self, abbrev: &Abbrev, dwarf: &Dwarf) -> Result<FileAddress, Error> {
+    pub fn high_pc(&self, compile_unit: &CompileUnit, dwarf: &Dwarf) -> Result<FileAddress, Error> {
+        let abbrev = dwarf.get_compile_unit_abbrev_table(compile_unit).get_by_code(self.abbrev_code).expect("Failed to find abbrev");
+
+        if let Some(range_attr) = self.get_attribute(abbrev, DwarfAttribute::DW_AT_ranges as u64) {
+            let range_list = range_attr.as_range_list(compile_unit, abbrev, dwarf).expect("Failed to get range list");
+
+            // high address is high address of last entry (which should exist)
+            let high_addr = range_list.last().expect("Expected non-empty range list").high;
+            return Ok(high_addr)
+        }
+
         let attr = self.get_attribute(abbrev, DwarfAttribute::DW_AT_high_pc as u64)
             .ok_or_else(|| Error::from_message("No high pc attribute found on DIE".to_owned()))?;
 
@@ -609,7 +648,7 @@ impl DIE {
             // offset from low_pc attribute
             // TODO: check int form!
             let offset = attr.as_int(dwarf)? as isize;
-            let low_pc = self.low_pc(abbrev, dwarf)?;
+            let low_pc = self.low_pc(compile_unit, dwarf)?;
             let high_pc = low_pc + offset;
             Ok(high_pc)
         }
