@@ -1179,6 +1179,43 @@ impl Dwarf {
         self.compile_units.as_slice()
     }
 
+    pub fn compile_unit_containing_address(&self, addr: &FileAddress) -> Option<&CompileUnit> {
+        self.compile_units.iter().find(|cu| {
+            if let DIEEntry::Entry(root) = cu.get_root(self) {
+                root.contains_address(cu, self, addr)
+            } else {
+                false
+            }
+        })
+    }
+
+    fn get_compile_unit(&self, compile_unit_offset: usize) -> &CompileUnit {
+        // TODO: create compile unit id type and lookup
+        self.compile_units.iter().find(|cu| cu.header.offset == compile_unit_offset)
+            .expect("Unknown compile unit at offset")
+    }
+
+    pub fn function_containing_address(&self, addr: &FileAddress) -> Option<DIE> {
+        let debug_info_data = self.debug_info_data();
+        let mut cursor = Cursor::new(debug_info_data);
+
+        self.function_index.values().find_map(|entry| {
+            let compile_unit = self.get_compile_unit(entry.compile_unit_offset);
+
+            cursor.set_position(entry.die_offset);
+            if let DIEEntry::Entry(die) = compile_unit.parse_die_entry(&mut cursor, self) {
+                let abbrev = die.get_abbrev(compile_unit, self);
+                if die.contains_address(compile_unit, self, addr) && abbrev.tag == DwarfTag::DW_TAG_subprogram as u64 {
+                    Some(die)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+    }
+
     pub fn get_compile_unit_abbrev_table(&self, compile_unit: &CompileUnit) -> &AbbrevTable {
         self.get_abbrev_table(compile_unit.header.abbrev_offset)
     }
