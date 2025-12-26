@@ -71,6 +71,10 @@ fn main() -> Result<(), DebuggerError> {
 
                 println!("Has children? {}", abbrev.has_children);
 
+                if let Some(name) = die.name(&dwarf) {
+                    println!("Name: {}", name)
+                }
+
                 if let Ok(low) = die.low_pc(&cu, &dwarf) {
                     println!("Low PC: {:?}", low);
 

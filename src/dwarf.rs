@@ -587,6 +587,49 @@ pub struct DIE {
 }
 
 impl DIE {
+    // TODO: add identifier for parent compile unit to DIE
+    fn get_abbrev<'a>(&self, compile_unit: &CompileUnit, dwarf: &'a Dwarf) -> &'a Abbrev {
+        dwarf.get_compile_unit_abbrev_table(compile_unit).get_by_code(self.abbrev_code).expect("Failed to find abbrev")
+    }
+
+    fn get_compile_unit<'a>(&self, dwarf: &'a Dwarf) -> &'a CompileUnit {
+        // TODO: add lookup to Dwarf type by offset
+        dwarf.get_compile_units().iter().find(|cu| cu.contains_offset(self.position))
+            .expect(&format!("Failed to find compile unit at offset {}", self.position))
+    }
+
+    pub fn name(&self, dwarf: &Dwarf) -> Option<String> {
+        let compile_unit = self.get_compile_unit(dwarf);
+        let abbrev = self.get_abbrev(compile_unit, dwarf);
+
+        if let Some(name_attr) = self.get_attribute(abbrev, DwarfAttribute::DW_AT_name as u64) {
+            // DIE contains name attribute
+            name_attr.as_string(dwarf).ok()
+        } else if let Some(spec_attr) = self.get_attribute(abbrev, DwarfAttribute::DW_AT_specification as u64) {
+            // 'out-of-line' definition i.e. functions declared in one place (e.g. a header file) and implemented
+            // in another
+            let spec = spec_attr.as_reference(compile_unit, dwarf).expect("Failed to get spec DIE");
+            match spec {
+                DIEEntry::Null(_) => None,
+                DIEEntry::Entry(spec_die) => {
+                    spec_die.name(dwarf)
+                }
+            }
+        } else if let Some(origin_attr) = self.get_attribute(abbrev, DwarfAttribute::DW_AT_abstract_origin as u64) {
+            // inlined function calls which point to their definitions
+            let origin = origin_attr.as_reference(compile_unit, dwarf).expect("Failed to get origin DIE");
+            match origin {
+                DIEEntry::Null(_) => None,
+                DIEEntry::Entry(origin_die) => {
+                    origin_die.name(dwarf)
+                }
+            }
+        } else {
+            // name not found
+            None
+        }
+    }
+
     pub fn contains_address(&self, compile_unit: &CompileUnit, dwarf: &Dwarf, addr: &FileAddress) -> bool {
         if ! Rc::ptr_eq(addr.elf_ptr(), &dwarf.elf) { return false; }
 
