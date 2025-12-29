@@ -611,7 +611,7 @@ impl Attribute {
 
                 // find compile unit containing offset
                 // TODO: add start/end offsets to CompileUnit!
-                let compile_unit = dwarf.get_compile_units().iter().find(|cu| cu.contains_offset(offset)).expect(&format!("Failed to find compile unit at offset {}", offset));
+                let compile_unit = dwarf.get_compile_units().find(|cu| cu.contains_offset(offset)).expect(&format!("Failed to find compile unit at offset {}", offset));
                 let die_entry = compile_unit.parse_die_entry(&mut cursor, dwarf);
 
                 return Ok(die_entry);
@@ -680,27 +680,38 @@ impl Attribute {
 
 #[derive(Clone, Debug)]
 pub struct DIE {
+    // id of the compile unit this DIE belongs to
+    compile_unit_id: CompileUnitId,
+
+    // location of this DIE within .debug_info
     position: usize,
+
+    // location of the next DIE within .debug_info
     next: usize,
+
+    // code for the abbrev definition for this DIE
     pub abbrev_code: NonZeroU64,
+
+    // offsets of the attributes of this DIE within .debug_info
+    // the attributes definition are stored within the corresponding index in the abbrev
     attribute_locations: Vec<usize>
 }
 
 impl DIE {
     // TODO: add identifier for parent compile unit to DIE
-    fn get_abbrev<'a>(&self, compile_unit: &CompileUnit, dwarf: &'a Dwarf) -> &'a Abbrev {
-        dwarf.get_compile_unit_abbrev_table(compile_unit).get_by_code(self.abbrev_code).expect("Failed to find abbrev")
+    fn get_abbrev<'a>(&self, dwarf: &'a Dwarf) -> &'a Abbrev {
+        dwarf.get_compile_unit_abbrev_table(self.compile_unit_id).get_by_code(self.abbrev_code).expect("Failed to find abbrev")
     }
 
     fn get_compile_unit<'a>(&self, dwarf: &'a Dwarf) -> &'a CompileUnit {
         // TODO: add lookup to Dwarf type by offset
-        dwarf.get_compile_units().iter().find(|cu| cu.contains_offset(self.position))
+        dwarf.get_compile_units().find(|cu| cu.contains_offset(self.position))
             .expect(&format!("Failed to find compile unit at offset {}", self.position))
     }
 
     pub fn name(&self, dwarf: &Dwarf) -> Option<String> {
         let compile_unit = self.get_compile_unit(dwarf);
-        let abbrev = self.get_abbrev(compile_unit, dwarf);
+        let abbrev = self.get_abbrev(dwarf);
 
         if let Some(name_attr) = self.get_attribute(abbrev, DwarfAttribute::DW_AT_name as u64) {
             // DIE contains name attribute
@@ -733,7 +744,7 @@ impl DIE {
     pub fn contains_address(&self, compile_unit: &CompileUnit, dwarf: &Dwarf, addr: &FileAddress) -> bool {
         if ! Rc::ptr_eq(addr.elf_ptr(), &dwarf.elf) { return false; }
 
-        let abbrev = dwarf.get_compile_unit_abbrev_table(compile_unit).get_by_code(self.abbrev_code).expect("Failed to find abbrev");
+        let abbrev = self.get_abbrev(dwarf);
 
         // NOTE: this should go first since the high/low pc methods iterate the range list if one exists
         if let Some(range_attr) = self.get_attribute(abbrev, DwarfAttribute::DW_AT_ranges as u64) {
@@ -755,7 +766,7 @@ impl DIE {
     }
 
     pub fn low_pc(&self, compile_unit: &CompileUnit, dwarf: &Dwarf) -> Result<FileAddress, Error> {
-        let abbrev = dwarf.get_compile_unit_abbrev_table(compile_unit).get_by_code(self.abbrev_code).expect("Failed to find abbrev");
+        let abbrev = self.get_abbrev(dwarf);
 
         if let Some(range_attr) = self.get_attribute(abbrev, DwarfAttribute::DW_AT_ranges as u64) {
             let mut range_list = range_attr.as_range_list(compile_unit, abbrev, dwarf).expect("Failed to get range list");
@@ -771,7 +782,7 @@ impl DIE {
     }
 
     pub fn high_pc(&self, compile_unit: &CompileUnit, dwarf: &Dwarf) -> Result<FileAddress, Error> {
-        let abbrev = dwarf.get_compile_unit_abbrev_table(compile_unit).get_by_code(self.abbrev_code).expect("Failed to find abbrev");
+        let abbrev = self.get_abbrev(dwarf);
 
         if let Some(range_attr) = self.get_attribute(abbrev, DwarfAttribute::DW_AT_ranges as u64) {
             let range_list = range_attr.as_range_list(compile_unit, abbrev, dwarf).expect("Failed to get range list");
@@ -897,19 +908,23 @@ impl CompileUnitHeader {
     }
 }
 
+// identifies a compile unit within a the DWARF data of an ELF file
+// contains the offset of the compile unit within the .debug_info section
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub struct CompileUnitId(usize);
+
 #[derive(Clone, Debug)]
 pub struct CompileUnit {
     header: CompileUnitHeader,
-    //parent: &'a Dwarf,
-    //data: &'a [u8],
-
-    // offset of the abbrev definition of this compile unit within the .debug_abbrev section
-    //abbrev_offset: usize
 }
 
 impl CompileUnit {
     fn new(header: CompileUnitHeader) -> Self {
         Self { header }
+    }
+
+    pub fn id(&self) -> CompileUnitId {
+        CompileUnitId(self.header.offset)
     }
 
     fn contains_offset(&self, offset: usize) -> bool {
@@ -930,7 +945,7 @@ impl CompileUnit {
             Some(abbrev_code) => {
                 // get abbreviation table for compile unit
                 // and lookup abbrev by code
-                let abbrev = dwarf.get_compile_unit_abbrev_table(self).get_by_code(abbrev_code).expect("Failed to find abbreviation code");
+                let abbrev = dwarf.get_compile_unit_abbrev_table(self.id()).get_by_code(abbrev_code).expect("Failed to find abbreviation code");
 
                 let mut attribute_locations = Vec::with_capacity(abbrev.attribute_specs.len());
                 for attr in abbrev.attribute_specs.iter() {
@@ -940,7 +955,7 @@ impl CompileUnit {
 
                 // next DIE should be at current cursor position
                 let next = cursor.position;
-                let die = DIE { position, next, attribute_locations, abbrev_code };
+                let die = DIE { compile_unit_id: self.id(), position, next, attribute_locations, abbrev_code };
                 DIEEntry::Entry(die)
             }
         }
@@ -990,9 +1005,7 @@ pub struct DIEChildIterator<'a> {
 
 impl <'a> DIEChildIterator<'a> {
     fn current_abbrev(&self) -> &Abbrev {
-        let cu = self.dwarf.get_compile_unit(self.compile_unit_offset);
-        let abbrev = self.dwarf.get_compile_unit_abbrev_table(cu);
-        abbrev.get_by_code(self.current.abbrev_code).expect("Failed to get abbrev for DIE")
+        self.current.get_abbrev(&self.dwarf)
     }
 
     fn read_next_entry(&mut self) -> DIEEntry {
@@ -1180,7 +1193,7 @@ pub struct Dwarf {
     elf: Rc<Elf>,
 
     // compile units within the ELF file
-    compile_units: Vec<CompileUnit>,
+    compile_units: HashMap<CompileUnitId, CompileUnit>,
 
     // keys are offsets within the .debug_abbrev section
     abbrev_tables: HashMap<usize, AbbrevTable>,
@@ -1191,7 +1204,7 @@ pub struct Dwarf {
 impl Dwarf {
     pub fn new(elf: Rc<Elf>) -> Result<Self, Error> {
         let compile_units = Self::parse_compile_units(elf.as_ref())?;
-        let abbrev_tables = Self::parse_abbrev_tables(&elf, compile_units.as_ref());
+        let abbrev_tables = Self::parse_abbrev_tables(&elf, &compile_units);
 
         let mut dwarf = Self {
             elf,
@@ -1206,9 +1219,13 @@ impl Dwarf {
         Ok(dwarf)
     }
 
-    fn parse_abbrev_tables(elf: &Elf, compile_units: &[CompileUnit]) -> HashMap<usize, AbbrevTable> {
+    pub fn get_compile_units(&self) -> impl Iterator<Item=&CompileUnit> {
+        self.compile_units.values()
+    }
+
+    fn parse_abbrev_tables(elf: &Elf, compile_units: &HashMap<CompileUnitId, CompileUnit>) -> HashMap<usize, AbbrevTable> {
         let mut abbrev_tables = HashMap::new();
-        for compile_unit in compile_units.iter() {
+        for compile_unit in compile_units.values() {
             let table = Self::parse_abbrev_table(elf, compile_unit.header.abbrev_offset);
             abbrev_tables.insert(compile_unit.header.abbrev_offset, table);
         }
@@ -1218,7 +1235,7 @@ impl Dwarf {
     fn build_function_index(&self) -> UnorderedMultiMap<String, DIEIndexEntry> {
         let mut index = UnorderedMultiMap::new();
 
-        for compile_unit in self.compile_units.iter() {
+        for compile_unit in self.get_compile_units() {
             if let DIEEntry::Entry(root) = compile_unit.get_root(self) {
                 self.index_die(&root, &mut index);
             }
@@ -1229,7 +1246,7 @@ impl Dwarf {
 
     fn index_die(&self, die: &DIE, function_index: &mut UnorderedMultiMap<String, DIEIndexEntry>) {
         let compile_unit = die.get_compile_unit(self);
-        let abbrev = die.get_abbrev(compile_unit, self);
+        let abbrev = die.get_abbrev(self);
 
         let has_range = die.get_attribute(abbrev, DwarfAttribute::DW_AT_low_pc as u64).is_some() ||
             die.get_attribute(abbrev, DwarfAttribute::DW_AT_ranges as u64).is_some();
@@ -1252,12 +1269,8 @@ impl Dwarf {
         }
     }
 
-    pub fn get_compile_units(&self) -> &[CompileUnit] {
-        self.compile_units.as_slice()
-    }
-
     pub fn compile_unit_containing_address(&self, addr: &FileAddress) -> Option<&CompileUnit> {
-        self.compile_units.iter().find(|cu| {
+        self.get_compile_units().find(|cu| {
             if let DIEEntry::Entry(root) = cu.get_root(self) {
                 root.contains_address(cu, self, addr)
             } else {
@@ -1267,9 +1280,9 @@ impl Dwarf {
     }
 
     fn get_compile_unit(&self, compile_unit_offset: usize) -> &CompileUnit {
-        // TODO: create compile unit id type and lookup
-        self.compile_units.iter().find(|cu| cu.header.offset == compile_unit_offset)
-            .expect("Unknown compile unit at offset")
+        // TODO: change argument type to compile unit id
+        let id = CompileUnitId(compile_unit_offset);
+        self.compile_units.get(&id).expect("Unknown compile unit")
     }
 
     pub fn function_containing_address(&self, addr: &FileAddress) -> Option<DIE> {
@@ -1281,7 +1294,7 @@ impl Dwarf {
 
             cursor.set_position(entry.die_offset);
             if let DIEEntry::Entry(die) = compile_unit.parse_die_entry(&mut cursor, self) {
-                let abbrev = die.get_abbrev(compile_unit, self);
+                let abbrev = die.get_abbrev(self);
                 if die.contains_address(compile_unit, self, addr) && abbrev.tag == DwarfTag::DW_TAG_subprogram as u64 {
                     Some(die)
                 } else {
@@ -1293,7 +1306,8 @@ impl Dwarf {
         })
     }
 
-    pub fn get_compile_unit_abbrev_table(&self, compile_unit: &CompileUnit) -> &AbbrevTable {
+    pub fn get_compile_unit_abbrev_table(&self, compile_unit_id: CompileUnitId) -> &AbbrevTable {
+        let compile_unit = self.get_compile_unit(compile_unit_id.0);
         self.get_abbrev_table(compile_unit.header.abbrev_offset)
     }
 
@@ -1353,16 +1367,17 @@ impl Dwarf {
         Ok(CompileUnit { header })
     }
 
-    fn parse_compile_units(elf: &Elf) -> Result<Vec<CompileUnit>, Error> {
+    fn parse_compile_units(elf: &Elf) -> Result<HashMap<CompileUnitId, CompileUnit>, Error> {
         let debug_info = elf.get_section_contents(".debug_info").expect("Failed to get .debug_info section");
         let mut cursor = Cursor::new(debug_info);
 
-        let mut units = Vec::new();
+        let mut units = HashMap::new();
 
         while !cursor.is_finished() {
             let compile_unit = Self::parse_compile_unit(&mut cursor)?;
 
-            units.push(compile_unit);
+            let id = compile_unit.id();
+            units.insert(id, compile_unit);
         }
 
         Ok(units)
@@ -1399,17 +1414,15 @@ mod test {
         let elf = Elf::open("target/debug/hello_rsdb")?;
         let dwarf = Dwarf::new(elf)?;
 
-        let compile_units = dwarf.get_compile_units();
-        assert_eq!(1, compile_units.len(), "Unexpected number of compile units");
+        assert_eq!(1, dwarf.get_compile_units().count(), "Unexpected number of compile units");
 
-        let compile_unit = &compile_units[0];
+        let compile_unit = dwarf.get_compile_units().next().expect("Expected compile unit");
         let root = match compile_unit.get_root(&dwarf) {
             DIEEntry::Entry(root) => root,
             DIEEntry::Null(_) => panic!("Expected DIE at root"),
         };
 
-        let abbrev = dwarf.get_compile_unit_abbrev_table(compile_unit).get_by_code(root.abbrev_code)
-            .ok_or_else(|| Error::from_message("Expected abbrev for root DIE".to_string()))?;
+        let abbrev = root.get_abbrev(&dwarf);
         let attr = root.get_attribute(abbrev, DwarfAttribute::DW_AT_language as u64)
             .ok_or_else(|| Error::from_message("Expected language attribute on root DIE".to_string()))?;
 
@@ -1426,14 +1439,13 @@ mod test {
         let dwarf = Dwarf::new(elf)?;
 
         let compile_units = dwarf.get_compile_units();
-        assert_eq!(2, compile_units.len(), "Unexpected number of compile units");
+        assert_eq!(2, dwarf.get_compile_units().count(), "Unexpected number of compile units");
 
         // find compile unit containing main function
-        let main_cu = dwarf.get_compile_units().iter().find(|cu| {
+        let main_cu = dwarf.get_compile_units().find(|cu| {
             if let DIEEntry::Entry(die) = cu.get_root(&dwarf) {
                 die.children(cu, &dwarf).find(|child| {
-                    let abbrev = dwarf.get_compile_unit_abbrev_table(cu).get_by_code(child.abbrev_code)
-                        .expect("Failed to get DIE abbrev");
+                    let abbrev = child.get_abbrev(&dwarf);
                     if abbrev.tag == DwarfTag::DW_TAG_subprogram as u64 {
                         if let Some(name_attr) = child.get_attribute(abbrev, DwarfAttribute::DW_AT_name as u64) {
                             let name = name_attr.as_string(&dwarf).expect("Expected name string");
@@ -1511,21 +1523,9 @@ mod test {
         for cu in dwarf.get_compile_units() {
             println!("{:?}", cu);
 
-            let abbrev_table = dwarf.get_compile_unit_abbrev_table(&cu);
+            let abbrev_table = dwarf.get_compile_unit_abbrev_table(cu.id());
             println!("Abbrev table:");
             println!("{:?}", abbrev_table)
         }
-    }
-
-    #[test]
-    fn parse_die_test() {
-        let elf = Elf::open("target/debug/hello_rsdb").expect("Failed to open ELF file");
-        let dwarf = Dwarf::new(elf).expect("Failed to parse DWARF");
-        let cu = &dwarf.get_compile_units()[0];
-
-        let mut it = DIEEntryIterator::for_compile_unit(cu.clone(), &dwarf);
-        let d1 = it.next();
-        let d2 = it.next();
-        let d3 = it.next();
     }
 }

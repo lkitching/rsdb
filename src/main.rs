@@ -55,7 +55,7 @@ fn main() -> Result<(), DebuggerError> {
     for cu in dwarf.get_compile_units() {
         println!("{:?}", cu);
 
-        let abbrev_table = dwarf.get_compile_unit_abbrev_table(&cu);
+        let abbrev_table = dwarf.get_compile_unit_abbrev_table(cu.id());
         println!("Abbrev table:");
         println!("{:?}", abbrev_table);
 
