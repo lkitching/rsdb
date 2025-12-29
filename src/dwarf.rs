@@ -822,14 +822,8 @@ impl DIE {
         None
     }
 
-    pub fn children<'a>(&self, compile_unit: &CompileUnit, dwarf: &'a Dwarf) -> DIEChildIterator<'a> {
-        DIEChildIterator {
-            dwarf,
-            current: self.clone(),
-            next_position: self.next,
-            state: ChildIteratorState::Parent,
-            compile_unit_id: compile_unit.id(),
-        }
+    pub fn children<'a>(&self, dwarf: &'a Dwarf) -> DIEChildIterator<'a> {
+        DIEChildIterator::from_parent(self.clone(), dwarf)
     }
 }
 
@@ -904,7 +898,7 @@ impl CompileUnitHeader {
     }
 }
 
-// identifies a compile unit within a the DWARF data of an ELF file
+// identifies a compile unit within the DWARF data of an ELF file
 // contains the offset of the compile unit within the .debug_info section
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct CompileUnitId(usize);
@@ -965,16 +959,6 @@ impl CompileUnit {
 
         self.parse_die_entry(&mut cursor, dwarf)
     }
-
-    fn children_of(&self, dwarf: &mut Dwarf, die: &DIE) -> DIEChildIterator {
-        // let parent_abbrev = self.get_abbrev_table(dwarf).get_by_code(die.abbrev_code).expect("Failed to get parent abbrev");
-        // DIEChildIterator {
-        //     compile_unit: self,
-        //     state: ChildIteratorState::Parent(die.next, parent_abbrev.clone()),
-        //     cursor: Cursor::new(self.data)
-        // }
-        unimplemented!()
-    }
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -999,6 +983,17 @@ pub struct DIEChildIterator<'a> {
 }
 
 impl <'a> DIEChildIterator<'a> {
+    fn from_parent(parent: DIE, dwarf: &'a Dwarf) -> Self {
+        let next_position = parent.next;
+        Self {
+            compile_unit_id: parent.compile_unit_id,
+            dwarf,
+            current: parent,
+            next_position,
+            state: ChildIteratorState::Parent,
+        }
+    }
+
     fn current_abbrev(&self) -> &Abbrev {
         self.current.get_abbrev(&self.dwarf)
     }
@@ -1071,13 +1066,7 @@ impl <'a> Iterator for DIEChildIterator<'a> {
                         },
                         None => {
                             // iterate children of current node to find next sibling
-                            let mut it = DIEChildIterator {
-                                dwarf: self.dwarf,
-                                compile_unit_id: self.compile_unit_id,
-                                current: self.current.clone(),
-                                state: ChildIteratorState::Parent,
-                                next_position: self.current.next,
-                            };
+                            let mut it = DIEChildIterator::from_parent(self.current.clone(), self.dwarf);
 
                             while let Some(_) = it.next() { }
 
@@ -1207,7 +1196,7 @@ impl Dwarf {
             }
         }
 
-        for child in die.children(compile_unit, self) {
+        for child in die.children(self) {
             self.index_die(&child, function_index);
         }
     }
@@ -1379,13 +1368,12 @@ mod test {
         let elf = Elf::open("target/debug/multi_cu")?;
         let dwarf = Dwarf::new(elf)?;
 
-        let compile_units = dwarf.get_compile_units();
         assert_eq!(2, dwarf.get_compile_units().count(), "Unexpected number of compile units");
 
         // find compile unit containing main function
         let main_cu = dwarf.get_compile_units().find(|cu| {
             if let DIEEntry::Entry(die) = cu.get_root(&dwarf) {
-                die.children(cu, &dwarf).find(|child| {
+                die.children(&dwarf).find(|child| {
                     let abbrev = child.get_abbrev(&dwarf);
                     if abbrev.tag == DwarfTag::DW_TAG_subprogram as u64 {
                         if let Some(name_attr) = child.get_attribute(abbrev, DwarfAttribute::DW_AT_name as u64) {
