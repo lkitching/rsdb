@@ -698,15 +698,12 @@ pub struct DIE {
 }
 
 impl DIE {
-    // TODO: add identifier for parent compile unit to DIE
     fn get_abbrev<'a>(&self, dwarf: &'a Dwarf) -> &'a Abbrev {
         dwarf.get_compile_unit_abbrev_table(self.compile_unit_id).get_by_code(self.abbrev_code).expect("Failed to find abbrev")
     }
 
     fn get_compile_unit<'a>(&self, dwarf: &'a Dwarf) -> &'a CompileUnit {
-        // TODO: add lookup to Dwarf type by offset
-        dwarf.get_compile_units().find(|cu| cu.contains_offset(self.position))
-            .expect(&format!("Failed to find compile unit at offset {}", self.position))
+        dwarf.get_compile_unit(self.compile_unit_id)
     }
 
     pub fn name(&self, dwarf: &Dwarf) -> Option<String> {
@@ -831,8 +828,7 @@ impl DIE {
             current: self.clone(),
             next_position: self.next,
             state: ChildIteratorState::Parent,
-            // TODO: add compile unit id to DIE
-            compile_unit_offset: compile_unit.header.offset,
+            compile_unit_id: compile_unit.id(),
         }
     }
 }
@@ -989,8 +985,7 @@ enum ChildIteratorState {
 }
 
 pub struct DIEChildIterator<'a> {
-    // TODO: create id? Need entire compile unit? use reference?
-    compile_unit_offset: usize,
+    compile_unit_id: CompileUnitId,
 
     dwarf: &'a Dwarf,
 
@@ -1011,7 +1006,7 @@ impl <'a> DIEChildIterator<'a> {
     fn read_next_entry(&mut self) -> DIEEntry {
         let mut cursor = self.dwarf.debug_info_cursor();
         cursor.set_position(self.current.next);
-        let cu = self.dwarf.get_compile_unit(self.compile_unit_offset);
+        let cu = self.dwarf.get_compile_unit(self.compile_unit_id);
         let entry = cu.parse_die_entry(&mut cursor, &self.dwarf);
 
         // TODO: move this?
@@ -1057,7 +1052,7 @@ impl <'a> Iterator for DIEChildIterator<'a> {
                 if abbrev.has_children {
                     match self.current.get_attribute(abbrev, DwarfAttribute::DW_AT_sibling as u64) {
                         Some(sibling_attr) => {
-                            let cu = self.dwarf.get_compile_unit(self.compile_unit_offset);
+                            let cu = self.dwarf.get_compile_unit(self.compile_unit_id);
                             match sibling_attr.as_reference(cu, &self.dwarf).expect("Failed to read referenced sibling DIE") {
                                 DIEEntry::Null(next_pos) => {
                                     // no sibling so end of children
@@ -1078,7 +1073,7 @@ impl <'a> Iterator for DIEChildIterator<'a> {
                             // iterate children of current node to find next sibling
                             let mut it = DIEChildIterator {
                                 dwarf: self.dwarf,
-                                compile_unit_offset: self.compile_unit_offset,
+                                compile_unit_id: self.compile_unit_id,
                                 current: self.current.clone(),
                                 state: ChildIteratorState::Parent,
                                 next_position: self.current.next,
@@ -1183,7 +1178,7 @@ impl <'a> Iterator for DIEEntryIterator<'a> {
 
 struct DIEIndexEntry {
     // used to locate DIE compile unit
-    compile_unit_offset: usize,
+    compile_unit_id: CompileUnitId,
 
     // offset of the DIE within .debug_info section
     die_offset: usize,
@@ -1256,7 +1251,7 @@ impl Dwarf {
             if is_function {
                 if let Some(name) = die.name(self) {
                     let entry = DIEIndexEntry {
-                        compile_unit_offset: compile_unit.header.offset,
+                        compile_unit_id: compile_unit.id(),
                         die_offset: die.position,
                     };
                     function_index.insert(name, entry);
@@ -1279,9 +1274,7 @@ impl Dwarf {
         })
     }
 
-    fn get_compile_unit(&self, compile_unit_offset: usize) -> &CompileUnit {
-        // TODO: change argument type to compile unit id
-        let id = CompileUnitId(compile_unit_offset);
+    fn get_compile_unit(&self, id: CompileUnitId) -> &CompileUnit {
         self.compile_units.get(&id).expect("Unknown compile unit")
     }
 
@@ -1290,7 +1283,7 @@ impl Dwarf {
         let mut cursor = Cursor::new(debug_info_data);
 
         self.function_index.values().find_map(|entry| {
-            let compile_unit = self.get_compile_unit(entry.compile_unit_offset);
+            let compile_unit = self.get_compile_unit(entry.compile_unit_id);
 
             cursor.set_position(entry.die_offset);
             if let DIEEntry::Entry(die) = compile_unit.parse_die_entry(&mut cursor, self) {
@@ -1307,7 +1300,7 @@ impl Dwarf {
     }
 
     pub fn get_compile_unit_abbrev_table(&self, compile_unit_id: CompileUnitId) -> &AbbrevTable {
-        let compile_unit = self.get_compile_unit(compile_unit_id.0);
+        let compile_unit = self.get_compile_unit(compile_unit_id);
         self.get_abbrev_table(compile_unit.header.abbrev_offset)
     }
 
