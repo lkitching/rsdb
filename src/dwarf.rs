@@ -215,6 +215,33 @@ pub enum DwarfAttribute {
     DW_AT_hi_user = 0x3fff,
 }
 
+#[allow(non_camel_case_types)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, FromRepr)]
+pub enum DwarfLang {
+    DW_LANG_C89 = 0x0001,
+    DW_LANG_C = 0x0002,
+    DW_LANG_Ada83 = 0x0003,
+    DW_LANG_C_plus_plus = 0x0004,
+    DW_LANG_Cobol74 = 0x0005,
+    DW_LANG_Cobol85 = 0x0006,
+    DW_LANG_Fortran77 = 0x0007,
+    DW_LANG_Fortran90 = 0x0008,
+    DW_LANG_Pascal83 = 0x0009,
+    DW_LANG_Modula2 = 0x000a,
+    DW_LANG_Java = 0x000b,
+    DW_LANG_C99 = 0x000c,
+    DW_LANG_Ada95 = 0x000d,
+    DW_LANG_Fortran95 = 0x000e,
+    DW_LANG_PLI = 0x000f,
+    DW_LANG_ObjC = 0x0010,
+    DW_LANG_ObjC_plus_plus = 0x0011,
+    DW_LANG_UPC = 0x0012,
+    DW_LANG_D = 0x0013,
+    DW_LANG_Python = 0x0014,
+    DW_LANG_lo_user = 0x8000,
+    DW_LANG_hi_user = 0xffff,
+}
+
 #[derive(Copy, Clone, Debug)]
 pub struct AttributeSpec {
     pub attribute: u64,
@@ -783,9 +810,14 @@ impl DIE {
         None
     }
 
-    pub fn children<'a>(&self, dwarf: &'a Dwarf) -> DIEChildIterator<'a> {
+    pub fn children<'a>(&self, compile_unit: &CompileUnit, dwarf: &'a Dwarf) -> DIEChildIterator<'a> {
         DIEChildIterator {
             dwarf,
+            current: self.clone(),
+            next_position: self.next,
+            state: ChildIteratorState::Parent,
+            // TODO: add compile unit id to DIE
+            compile_unit_offset: compile_unit.header.offset,
         }
     }
 }
@@ -794,6 +826,16 @@ impl DIE {
 pub enum DIEEntry {
     Null(usize),
     Entry(DIE)
+}
+
+impl DIEEntry {
+    // returns the position of the next DIE entry
+    fn next_entry_position(&self) -> usize {
+        match self {
+            Self::Null(next) => *next,
+            Self::Entry(die) => die.next,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -920,122 +962,153 @@ impl CompileUnit {
     }
 }
 
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 enum ChildIteratorState {
-    Parent(usize, Abbrev),
-    Sibling(DIE, Abbrev),
-    Finished
+    Parent,
+    Sibling,
+    Finished,
 }
 
 pub struct DIEChildIterator<'a> {
+    // TODO: create id? Need entire compile unit? use reference?
+    compile_unit_offset: usize,
+
     dwarf: &'a Dwarf,
+
+    // current DIE
+    current: DIE,
+
+    // position of next entry
+    next_position: usize,
+
+    state: ChildIteratorState,
+}
+
+impl <'a> DIEChildIterator<'a> {
+    fn current_abbrev(&self) -> &Abbrev {
+        let cu = self.dwarf.get_compile_unit(self.compile_unit_offset);
+        let abbrev = self.dwarf.get_compile_unit_abbrev_table(cu);
+        abbrev.get_by_code(self.current.abbrev_code).expect("Failed to get abbrev for DIE")
+    }
+
+    fn read_next_entry(&mut self) -> DIEEntry {
+        let mut cursor = self.dwarf.debug_info_cursor();
+        cursor.set_position(self.current.next);
+        let cu = self.dwarf.get_compile_unit(self.compile_unit_offset);
+        let entry = cu.parse_die_entry(&mut cursor, &self.dwarf);
+
+        // TODO: move this?
+        self.next_position = entry.next_entry_position();
+
+        entry
+    }
 }
 
 impl <'a> Iterator for DIEChildIterator<'a> {
     type Item = DIE;
     fn next(&mut self) -> Option<Self::Item> {
-        return None;
-        // match self.state {
-        //     ChildIteratorState::Parent(next_pos, ref parent_abbrev) => {
-        //         self.cursor.set_position(next_pos);
-        //
-        //         if parent_abbrev.has_children {
-        //             // next item is the first child of the parent
-        //             let child_die_entry = self.compile_unit.parse_die_entry(&mut self.cursor);
-        //
-        //             match child_die_entry {
-        //                 DIEEntry::Null(sibling_pos) => {
-        //                     // parent can have children but has none
-        //                     // next DIE entry is therefore sibling of the parent
-        //                     // set cursor position to point to next item
-        //                     self.cursor.set_position(sibling_pos);
-        //                     self.state = ChildIteratorState::Finished;
-        //                     None
-        //                 },
-        //                 DIEEntry::Entry(entry) => {
-        //                     // first child
-        //                     let sibling_abbrev = self.compile_unit.get_abbrev_table().get_by_code(entry.abbrev_code).expect("Failed to get sibling abbrev");
-        //                     self.state = ChildIteratorState::Sibling(entry.clone(), sibling_abbrev.clone());
-        //                     Some(entry)
-        //                 }
-        //             }
-        //         } else {
-        //             // parent has no children
-        //             self.state = ChildIteratorState::Finished;
-        //             None
-        //         }
-        //     },
-        //     ChildIteratorState::Sibling(sibling,ref sibling_abbrev) => {
-        //         if sibling_abbrev.has_children {
-        //             // see if the sibling has a DW_AT_sibling attribute
-        //             // if it does this should be a reference to the sibling
-        //             match sibling.get_attribute(self.compile_unit, DwarfAttribute::DW_AT_sibling) {
-        //                 Some(sibling_at_attr) => {
-        //                     let sibling_entry = sibling_at_attr.as_reference().expect("Failed to parse sibling entry");
-        //                     match sibling_entry {
-        //                         DIEEntry::Null(next) => {
-        //                             self.cursor.set_position(next);
-        //                             self.state = ChildIteratorState::Finished;
-        //                             None
-        //                         },
-        //                         DIEEntry::Entry(sibling) => {
-        //                             let sibling_abbrev = self.compile_unit.get_abbrev_table().get_by_code(sibling.abbrev_code).expect("Failed to get sibling abbrev");
-        //                             self.cursor.set_position(sibling.next);
-        //                             self.state = ChildIteratorState::Sibling(sibling.clone(), sibling_abbrev.clone());
-        //                             Some(sibling)
-        //                         }
-        //                     }
-        //                 },
-        //                 None => {
-        //                     // create iterator for sibling's children and skip over them to find next sibling
-        //                     let mut nephew_iter = DIEChildIterator { compile_unit: self.compile_unit, cursor: self.cursor.clone(), state: ChildIteratorState::Parent(sibling_next_pos, sibling_abbrev.clone()) };
-        //                     for _ in nephew_iter {
-        //                     }
-        //
-        //                     // child iterator position points to next sibling
-        //                     self.cursor.set_position(nephew_iter.cursor.position);
-        //
-        //                     // parse next sibling
-        //                     let sibling_entry = CompileUnit::parse_die_entry(&mut self.cursor);
-        //                     match sibling_entry {
-        //                         DIEEntry::Null(next_pos) => {
-        //                             // NOTE: cursor should already be at this position
-        //                             self.cursor.set_position(next_pos);
-        //                             self.state = ChildIteratorState::Finished;
-        //                             None
-        //                         },
-        //                         DIEEntry::Entry(sibling) => {
-        //                             let sibling_abbrev = self.compile_unit.get_abbrev_table().get_by_code(sibling.abbrev_code).expect("Failed to get sibling abbrev");
-        //                             self.state = ChildIteratorState::Sibling(sibling.next, sibling_abbrev.clone());
-        //                             Some(sibling)
-        //                         }
-        //                     }
-        //                 }
-        //             }
-        //         } else {
-        //             // NOTE: cursor should already be at this position
-        //             self.cursor.set_position(sibling_next_pos);
-        //             let sibling = self.compile_unit.parse_die_entry(&mut self.cursor);
-        //
-        //             match sibling {
-        //                 DIEEntry::Null(sibling_next) => {
-        //                     // no more children
-        //                     // move cursor to point to next DIE entry
-        //                     self.cursor.position = sibling_next;
-        //                     self.state = ChildIteratorState::Finished;
-        //                     None
-        //                 },
-        //                 DIEEntry::Entry(sibling) => {
-        //                     let sibling_abbrev = self.compile_unit.get_abbrev_table().get_by_code(sibling.abbrev_code).expect("Failed to get sibling abbrev");
-        //                     self.state = ChildIteratorState::Sibling(sibling.next, sibling_abbrev.clone());
-        //                     Some(sibling)
-        //                 }
-        //             }
-        //         }
-        //     },
-        //     ChildIteratorState::Finished => {
-        //         None
-        //     }
-        // }
+        match self.state {
+            ChildIteratorState::Parent => {
+                // currently positioned at first child of parent if one exists
+                let abbrev = self.current_abbrev();
+                if abbrev.has_children {
+                    // next item is first child of parent node
+                    match self.read_next_entry() {
+                        DIEEntry::Null(next_pos) => {
+                            // no children
+                            self.state = ChildIteratorState::Finished;
+                            None
+                        },
+                        DIEEntry::Entry(child) => {
+                            self.state = ChildIteratorState::Sibling;
+                            self.current = child.clone();
+                            Some(child)
+                        }
+                    }
+                } else {
+                    self.state = ChildIteratorState::Finished;
+                    None
+                }
+            },
+            ChildIteratorState::Sibling => {
+                // current is a child of the original parent DIE
+                // if it can have children we need to find the next sibling
+                //   * if it contains the AT_sibling attribute, lookup the location of the next
+                //     sibling
+                //   * otherwise create another child iterator and iterator though all the children
+                let abbrev = self.current_abbrev();
+                if abbrev.has_children {
+                    match self.current.get_attribute(abbrev, DwarfAttribute::DW_AT_sibling as u64) {
+                        Some(sibling_attr) => {
+                            let cu = self.dwarf.get_compile_unit(self.compile_unit_offset);
+                            match sibling_attr.as_reference(cu, &self.dwarf).expect("Failed to read referenced sibling DIE") {
+                                DIEEntry::Null(next_pos) => {
+                                    // no sibling so end of children
+                                    self.next_position = next_pos;
+                                    self.state = ChildIteratorState::Finished;
+                                    None
+                                },
+                                DIEEntry::Entry(sibling) => {
+                                    // found next sibling
+                                    self.next_position = sibling.next;
+                                    //self.state = ChildIteratorState::Sibling; no-op
+                                    self.current = sibling.clone();
+                                    Some(sibling)
+                                }
+                            }
+                        },
+                        None => {
+                            // iterate children of current node to find next sibling
+                            let mut it = DIEChildIterator {
+                                dwarf: self.dwarf,
+                                compile_unit_offset: self.compile_unit_offset,
+                                current: self.current.clone(),
+                                state: ChildIteratorState::Parent,
+                                next_position: self.current.next,
+                            };
+
+                            while let Some(_) = it.next() { }
+
+                            self.next_position = it.next_position;
+
+                            // try read next DIE
+                            match self.read_next_entry() {
+                                DIEEntry::Null(next_pos) => {
+                                    // no more siblings so end of children for original root
+                                    //self.next_position = next_pos;
+                                    self.state = ChildIteratorState::Finished;
+                                    None
+                                },
+                                DIEEntry::Entry(sibling) => {
+                                    //self.position = sibling.next;
+                                    // self.state = ChildIteratorState::Sibling; no-op
+                                    self.current = sibling.clone();
+                                    Some(sibling)
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // parse next entry
+                    match self.read_next_entry() {
+                        DIEEntry::Null(next_pos) => {
+                            //self.position = next_pos;
+                            self.state = ChildIteratorState::Finished;
+                            None
+                        },
+                        DIEEntry::Entry(sibling) => {
+                            //self.position = sibling.position;
+                            //self.state = ChildIteratorState::Sibling; no-op
+                            self.current = sibling.clone();
+                            Some(sibling)
+                        }
+                    }
+                }
+            },
+            ChildIteratorState::Finished => {
+                None
+            }
+        }
     }
 }
 
@@ -1132,8 +1205,8 @@ impl Dwarf {
     fn parse_abbrev_tables(elf: &Elf, compile_units: &[CompileUnit]) -> HashMap<usize, AbbrevTable> {
         let mut abbrev_tables = HashMap::new();
         for compile_unit in compile_units.iter() {
-            let table = Self::parse_abbrev_table(elf, compile_unit.header.offset);
-            abbrev_tables.insert(compile_unit.header.offset, table);
+            let table = Self::parse_abbrev_table(elf, compile_unit.header.abbrev_offset);
+            abbrev_tables.insert(compile_unit.header.abbrev_offset, table);
         }
         abbrev_tables
     }
@@ -1170,7 +1243,7 @@ impl Dwarf {
             }
         }
 
-        for child in die.children(self) {
+        for child in die.children(compile_unit, self) {
             self.index_die(&child, function_index);
         }
     }
@@ -1316,6 +1389,68 @@ impl Dwarf {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn dwarf_language_test() -> Result<(), Error> {
+        let elf = Elf::open("target/debug/hello_rsdb")?;
+        let dwarf = Dwarf::new(elf)?;
+
+        let compile_units = dwarf.get_compile_units();
+        assert_eq!(1, compile_units.len(), "Unexpected number of compile units");
+
+        let compile_unit = &compile_units[0];
+        let root = match compile_unit.get_root(&dwarf) {
+            DIEEntry::Entry(root) => root,
+            DIEEntry::Null(_) => panic!("Expected DIE at root"),
+        };
+
+        let abbrev = dwarf.get_compile_unit_abbrev_table(compile_unit).get_by_code(root.abbrev_code)
+            .ok_or_else(|| Error::from_message("Expected abbrev for root DIE".to_string()))?;
+        let attr = root.get_attribute(abbrev, DwarfAttribute::DW_AT_language as u64)
+            .ok_or_else(|| Error::from_message("Expected language attribute on root DIE".to_string()))?;
+
+        let lang = attr.as_int(&dwarf)?;
+
+        // NOTE: differs from book
+        assert_eq!(DwarfLang::DW_LANG_C99 as u64, lang, "Unexpected lang");
+        Ok(())
+    }
+
+    #[test]
+    fn find_main_compile_unit_test() -> Result<(), Error> {
+        let elf = Elf::open("target/debug/multi_cu")?;
+        let dwarf = Dwarf::new(elf)?;
+
+        let compile_units = dwarf.get_compile_units();
+        assert_eq!(2, compile_units.len(), "Unexpected number of compile units");
+
+        // find compile unit containing main function
+        let main_cu = dwarf.get_compile_units().iter().find(|cu| {
+            if let DIEEntry::Entry(die) = cu.get_root(&dwarf) {
+                die.children(cu, &dwarf).find(|child| {
+                    let abbrev = dwarf.get_compile_unit_abbrev_table(cu).get_by_code(child.abbrev_code)
+                        .expect("Failed to get DIE abbrev");
+                    if abbrev.tag == DwarfTag::DW_TAG_subprogram as u64 {
+                        if let Some(name_attr) = child.get_attribute(abbrev, DwarfAttribute::DW_AT_name as u64) {
+                            let name = name_attr.as_string(&dwarf).expect("Expected name string");
+                            name == "main"
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                }).is_some()
+            } else {
+                false
+            }
+        });
+
+        assert!(main_cu.is_some(), "Expected compile unit with main function child");
+
+
+        Ok(())
+    }
 
     #[test]
     fn get_abbrev_table_test() {
