@@ -505,7 +505,11 @@ impl <'a> Iterator for RangeListIterator<'a> {
                 match self.base_address {
                     None => {
                         // no base address yet found
-                        panic!("Not encountered a base address by position {}", self.cursor.position);
+                        // hi and low are absolute addresses
+                        let low_addr = FileAddress::new(Rc::clone(&self.dwarf.elf), low as usize);
+                        let high_addr = FileAddress::new(Rc::clone(&self.dwarf.elf), hi as usize);
+
+                        return Some(RangeListEntry { low: low_addr, high: high_addr });
                     },
                     Some(ref base_addr) => {
                         let low_addr = base_addr.clone() + low as isize;
@@ -1448,6 +1452,54 @@ mod test {
 
         assert!(main_cu.is_some(), "Expected compile unit with main function child");
 
+
+        Ok(())
+    }
+
+    #[test]
+    fn range_list_test() -> Result<(), Error> {
+        let elf = Elf::open("target/debug/hello_rsdb")?;
+        let dwarf = Dwarf::new(elf)?;
+
+        let mut range_data: Vec<u64> = vec![
+            0x12341234, 0x12341236,
+            0xFFFFFFFFFFFFFFFF, 0x32,
+            0x12341234, 0x12341236,
+            0x0, 0x0
+        ];
+
+        let range_data_bytes = unsafe {
+            let p = range_data.as_mut_ptr() as *mut u8;
+            Vec::from_raw_parts(p, range_data.len() * 8, range_data.capacity() * 8)
+        };
+
+        mem::forget(range_data);
+
+        let cursor = Cursor::new(range_data_bytes.as_slice());
+        let mut range_list = RangeListIterator {
+            dwarf: &dwarf,
+            cursor,
+            base_address: None
+        };
+
+        let e1 = range_list.next().expect("Expected range list entry");
+        assert_eq!(0x12341234, e1.low.addr(), "Unexpected low address");
+        assert_eq!(0x12341236, e1.high.addr(), "Unexpected high address");
+        assert!(e1.contains(&FileAddress::new(Rc::clone(&dwarf.elf), 0x12341234)), "Expected entry to contain address");
+        assert!(e1.contains(&FileAddress::new(Rc::clone(&dwarf.elf), 0x12341235)), "Expected entry to contain address");
+        assert!(! e1.contains(&FileAddress::new(Rc::clone(&dwarf.elf), 0x12341236)), "Expected entry to not contain address");
+
+        // next entry should be offset by 0x32
+        let e2 = range_list.next().expect("Expected range list entry");
+        assert_eq!(0x12341266, e2.low.addr(), "Unexpected low address");
+        assert_eq!(0x12341268, e2.high.addr(), "Unexpected high address");
+        assert!(e2.contains(&FileAddress::new(Rc::clone(&dwarf.elf), 0x12341266)), "Expected entry to contain address");
+        assert!(e2.contains(&FileAddress::new(Rc::clone(&dwarf.elf), 0x12341267)), "Expected entry to contain address");
+        assert!(! e2.contains(&FileAddress::new(Rc::clone(&dwarf.elf), 0x12341268)), "Expected entry to not contain address");
+
+        assert!(range_list.next().is_none(), "Expected end of range list");
+
+        // NOTE: tests for materialised range list 'contains' member missing
 
         Ok(())
     }
