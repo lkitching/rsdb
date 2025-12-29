@@ -1124,58 +1124,6 @@ impl <'a> Iterator for DIEChildIterator<'a> {
     }
 }
 
-pub struct DIEEntryIterator<'a> {
-    compile_unit: CompileUnit,
-    current: DIEEntry,
-    dwarf: &'a Dwarf,
-    done: bool,
-}
-
-impl <'a> DIEEntryIterator<'a> {
-    pub fn for_compile_unit(compile_unit: CompileUnit, dwarf: &'a Dwarf) -> Self {
-        let root = compile_unit.get_root(&dwarf);
-
-        Self {
-            compile_unit,
-            current: root,
-            dwarf,
-            done: false,
-        }
-    }
-}
-
-impl <'a> Iterator for DIEEntryIterator<'a> {
-    type Item = DIEEntry;
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.done { return None; }
-
-        let mut cursor = self.dwarf.debug_info_cursor();
-
-        let offset = match &self.current {
-            DIEEntry::Null(offset) => {
-                // TODO: need to track depth so we know when done?
-                // move cursor to offset
-                *offset
-            },
-            DIEEntry::Entry(die) => {
-                // move cursor to next offset
-                die.next
-            }
-        };
-        cursor.set_position(offset);
-
-        if cursor.is_finished() {
-            self.done = true;
-            return None;
-        }
-
-        let next = self.compile_unit.parse_die_entry(&mut cursor, &self.dwarf);
-        let ret = mem::replace(&mut self.current, next);
-
-        Some(ret)
-    }
-}
-
 struct DIEIndexEntry {
     // used to locate DIE compile unit
     compile_unit_id: CompileUnitId,
