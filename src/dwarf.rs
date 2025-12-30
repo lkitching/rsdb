@@ -961,152 +961,116 @@ impl CompileUnit {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, Debug)]
 enum ChildIteratorState {
-    Parent,
-    Sibling,
-    Finished,
+    // pointing to parent node, next DIE is first child if one exists
+    Parent(DIE),
+
+    // pointing to child of original parent
+    // next DIE is child of this node if it can have children or next sibling node (next child of
+    // original parent)
+    Sibling(DIE),
+
+    // finished iterating children. Contains offset of next DIE in compile unit
+    Finished(usize),
 }
 
 pub struct DIEChildIterator<'a> {
     compile_unit_id: CompileUnitId,
-
     dwarf: &'a Dwarf,
-
-    // current DIE
-    current: DIE,
-
-    // position of next entry
-    next_position: usize,
-
     state: ChildIteratorState,
 }
 
 impl <'a> DIEChildIterator<'a> {
-    fn from_parent(parent: DIE, dwarf: &'a Dwarf) -> Self {
-        let next_position = parent.next;
-        Self {
-            compile_unit_id: parent.compile_unit_id,
-            dwarf,
-            current: parent,
-            next_position,
-            state: ChildIteratorState::Parent,
+    fn next_position(&self) -> usize {
+        match &self.state {
+            ChildIteratorState::Parent(parent) => parent.next,
+            ChildIteratorState::Sibling(sibling) => sibling.next,
+            ChildIteratorState::Finished(next) => *next,
         }
     }
 
-    fn current_abbrev(&self) -> &Abbrev {
-        self.current.get_abbrev(&self.dwarf)
+    fn from_parent(parent: DIE, dwarf: &'a Dwarf) -> Self {
+        Self {
+            compile_unit_id: parent.compile_unit_id,
+            dwarf,
+            state: ChildIteratorState::Parent(parent),
+        }
     }
 
-    fn read_next_entry(&mut self) -> DIEEntry {
+    fn read_entry_at(&self, position: usize) -> DIEEntry {
         let mut cursor = self.dwarf.debug_info_cursor();
-        cursor.set_position(self.current.next);
+        cursor.set_position(position);
         let cu = self.dwarf.get_compile_unit(self.compile_unit_id);
-        let entry = cu.parse_die_entry(&mut cursor, &self.dwarf);
+        cu.parse_die_entry(&mut cursor, &self.dwarf)
+    }
 
-        // TODO: move this?
-        self.next_position = entry.next_entry_position();
-
-        entry
+    fn update_state(&mut self, entry: DIEEntry) -> Option<DIE> {
+        // update the state based on the result of parsing the next DIE
+        // if it's null then there are no more siblings i.e. children of the original parent
+        // node
+        match entry {
+            DIEEntry::Null(next_pos) => {
+                self.state = ChildIteratorState::Finished(next_pos);
+                None
+            },
+            DIEEntry::Entry(die) => {
+                self.state = ChildIteratorState::Sibling(die.clone());
+                Some(die)
+            }
+        }
     }
 }
 
 impl <'a> Iterator for DIEChildIterator<'a> {
     type Item = DIE;
     fn next(&mut self) -> Option<Self::Item> {
-        match self.state {
-            ChildIteratorState::Parent => {
+        match &self.state {
+            ChildIteratorState::Parent(parent) => {
                 // currently positioned at first child of parent if one exists
-                let abbrev = self.current_abbrev();
+                let abbrev = parent.get_abbrev(&self.dwarf);
                 if abbrev.has_children {
                     // next item is first child of parent node
-                    match self.read_next_entry() {
-                        DIEEntry::Null(next_pos) => {
-                            // no children
-                            self.state = ChildIteratorState::Finished;
-                            None
-                        },
-                        DIEEntry::Entry(child) => {
-                            self.state = ChildIteratorState::Sibling;
-                            self.current = child.clone();
-                            Some(child)
-                        }
-                    }
+                    let entry = self.read_entry_at(parent.next);
+                    self.update_state(entry)
                 } else {
-                    self.state = ChildIteratorState::Finished;
+                    self.state = ChildIteratorState::Finished(parent.next);
                     None
                 }
             },
-            ChildIteratorState::Sibling => {
+            ChildIteratorState::Sibling(sibling) => {
                 // current is a child of the original parent DIE
                 // if it can have children we need to find the next sibling
                 //   * if it contains the AT_sibling attribute, lookup the location of the next
                 //     sibling
                 //   * otherwise create another child iterator and iterator though all the children
-                let abbrev = self.current_abbrev();
+                // if it cannot have children the next DIE is its next sibling
+                let abbrev = sibling.get_abbrev(&self.dwarf);
                 if abbrev.has_children {
-                    match self.current.get_attribute(abbrev, DwarfAttribute::DW_AT_sibling as u64) {
+                    match sibling.get_attribute(abbrev, DwarfAttribute::DW_AT_sibling as u64) {
                         Some(sibling_attr) => {
                             let cu = self.dwarf.get_compile_unit(self.compile_unit_id);
-                            match sibling_attr.as_reference(cu, &self.dwarf).expect("Failed to read referenced sibling DIE") {
-                                DIEEntry::Null(next_pos) => {
-                                    // no sibling so end of children
-                                    self.next_position = next_pos;
-                                    self.state = ChildIteratorState::Finished;
-                                    None
-                                },
-                                DIEEntry::Entry(sibling) => {
-                                    // found next sibling
-                                    self.next_position = sibling.next;
-                                    //self.state = ChildIteratorState::Sibling; no-op
-                                    self.current = sibling.clone();
-                                    Some(sibling)
-                                }
-                            }
+                            let sibling_entry = sibling_attr.as_reference(cu, &self.dwarf).expect("Failed to read referenced sibling DIE");
+                            self.update_state(sibling_entry)
                         },
                         None => {
                             // iterate children of current node to find next sibling
-                            let mut it = DIEChildIterator::from_parent(self.current.clone(), self.dwarf);
+                            let mut it = DIEChildIterator::from_parent(sibling.clone(), self.dwarf);
 
                             while let Some(_) = it.next() { }
 
-                            self.next_position = it.next_position;
-
-                            // try read next DIE
-                            match self.read_next_entry() {
-                                DIEEntry::Null(next_pos) => {
-                                    // no more siblings so end of children for original root
-                                    //self.next_position = next_pos;
-                                    self.state = ChildIteratorState::Finished;
-                                    None
-                                },
-                                DIEEntry::Entry(sibling) => {
-                                    //self.position = sibling.next;
-                                    // self.state = ChildIteratorState::Sibling; no-op
-                                    self.current = sibling.clone();
-                                    Some(sibling)
-                                }
-                            }
+                            // read next DIE after sibling's children
+                            let sibling_entry = self.read_entry_at(it.next_position());
+                            self.update_state(sibling_entry)
                         }
                     }
                 } else {
                     // parse next entry
-                    match self.read_next_entry() {
-                        DIEEntry::Null(next_pos) => {
-                            //self.position = next_pos;
-                            self.state = ChildIteratorState::Finished;
-                            None
-                        },
-                        DIEEntry::Entry(sibling) => {
-                            //self.position = sibling.position;
-                            //self.state = ChildIteratorState::Sibling; no-op
-                            self.current = sibling.clone();
-                            Some(sibling)
-                        }
-                    }
+                    let sibling_entry = self.read_entry_at(sibling.next);
+                    self.update_state(sibling_entry)
                 }
             },
-            ChildIteratorState::Finished => {
+            ChildIteratorState::Finished(_) => {
                 None
             }
         }
