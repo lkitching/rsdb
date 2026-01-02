@@ -1,16 +1,20 @@
+mod line_table;
+
 use std::rc::Rc;
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::mem;
 use std::num::NonZeroU64;
 use std::ops::AddAssign;
-
+use std::path::{Path, PathBuf};
 use strum_macros::FromRepr;
 
 use crate::elf::{Elf};
 use crate::types::{FileAddress, TryFromBytes};
 use crate::error::Error;
 use crate::multimap::UnorderedMultiMap;
+use line_table::{LineTable};
+use crate::dwarf::line_table::SourceFile;
 
 #[allow(non_camel_case_types)]
 #[repr(u64)]
@@ -253,12 +257,12 @@ pub struct Abbrev {
     code: NonZeroU64,
     tag: u64,
     pub has_children: bool,
-    pub attribute_specs: Vec<AttributeSpec>
+    pub attribute_specs: Vec<AttributeSpec>,
 }
 
 #[derive(Debug)]
 pub struct AbbrevTable {
-    entries: HashMap<NonZeroU64, Abbrev>
+    entries: HashMap<NonZeroU64, Abbrev>,
 }
 
 impl AbbrevTable {
@@ -269,16 +273,20 @@ impl AbbrevTable {
 
 struct Cursor<'a> {
     data: &'a [u8],
-    position: usize
+    position: usize,
 }
 
-impl <'a> Cursor<'a> {
-    fn new(data: &'a[u8]) -> Self {
+impl<'a> Cursor<'a> {
+    fn new(data: &'a [u8]) -> Self {
         Self { data, position: 0 }
     }
 
     fn set_position(&mut self, position: usize) {
         self.position = position;
+    }
+
+    fn peek(&self) -> u8 {
+        self.data[self.position]
     }
 
     fn is_finished(&self) -> bool {
@@ -304,7 +312,8 @@ impl <'a> Cursor<'a> {
 
     fn string(&mut self) -> String {
         // search for terminating null byte from current position
-        let mut end = self.position;
+        let start = self.position;
+        let mut end = start;
         loop {
             if end < self.data.len() {
                 if self.data[end] == 0 {
@@ -317,11 +326,11 @@ impl <'a> Cursor<'a> {
             }
         }
 
-        let cs = CStr::from_bytes_with_nul(&self.data[self.position..end+1]).expect("Failed to create CStr");
+        let cs = CStr::from_bytes_with_nul(&self.data[start..end + 1]).expect("Failed to create CStr");
         let s = cs.to_string_lossy().to_string();
 
         // position cursor past end of string
-        self.position = end + 2;
+        self.position = end + 1;
 
         s
     }
@@ -396,43 +405,43 @@ impl <'a> Cursor<'a> {
         match form {
             DW_FORM_flag_present => {
                 // NOTE: attribute indicates presence so value uses no space
-            },
+            }
             DW_FORM_data1 | DW_FORM_ref1 | DW_FORM_flag => {
                 self.position += 1;
-            },
+            }
             DW_FORM_data2 | DW_FORM_ref2 => {
                 self.position += 2
-            },
+            }
             DW_FORM_data4 | DW_FORM_ref4 | DW_FORM_ref_addr | DW_FORM_sec_offset | DW_FORM_strp => {
                 self.position += 4
-            },
+            }
             DW_FORM_data8 | DW_FORM_addr => {
                 // WARNING: DW_FORM_addr depends on system address size!
                 // we only support 64-bit so far
                 self.position += 8
-            },
+            }
             DW_FORM_sdata => {
                 self.sleb128();
-            },
+            }
             DW_FORM_udata | DW_FORM_ref_udata => {
                 self.uleb128();
-            },
+            }
             DW_FORM_block1 => {
                 let len = self.u8();
                 self.position += len as usize;
-            },
+            }
             DW_FORM_block2 => {
                 let len = self.u16();
                 self.position += len as usize;
-            },
+            }
             DW_FORM_block4 => {
                 let len = self.u32();
                 self.position += len as usize;
-            },
+            }
             DW_FORM_block | DW_FORM_exprloc => {
                 let len = self.uleb128();
                 self.position += len as usize;
-            },
+            }
             DW_FORM_string => {
                 // search for terminating 0 byte
                 while !self.is_finished() && self.data[self.position] != 0 {
@@ -441,13 +450,13 @@ impl <'a> Cursor<'a> {
 
                 // skip past null terminator
                 self.position += 1;
-            },
+            }
             DW_FORM_indirect => {
                 // indirect form
                 let raw_form = self.uleb128();
                 let form = DwarfForm::from_repr(raw_form).expect("Invalid DWARF form value");
                 self.skip_form(form);
-            },
+            }
             DW_FORM_ref8 | DW_FORM_ref_sig8 => {
                 // NOTE: not supported in the book!
                 panic!("DW_FORM_ref8 and DW_FORM_ref_sig8 forms not supported");
@@ -457,7 +466,7 @@ impl <'a> Cursor<'a> {
     }
 }
 
-impl <'a> AddAssign<usize> for Cursor<'a> {
+impl<'a> AddAssign<usize> for Cursor<'a> {
     fn add_assign(&mut self, rhs: usize) {
         self.position += rhs
     }
@@ -480,11 +489,11 @@ pub struct RangeListIterator<'a> {
     base_address: Option<FileAddress>,
 }
 
-impl <'a> RangeListIterator<'a> {
+impl<'a> RangeListIterator<'a> {
     const BASE_ADDRESS_FLAG: u64 = 0xffffffffffffffff;
 }
 
-impl <'a> Iterator for RangeListIterator<'a> {
+impl<'a> Iterator for RangeListIterator<'a> {
     type Item = RangeListEntry;
     fn next(&mut self) -> Option<Self::Item> {
         loop {
@@ -510,14 +519,14 @@ impl <'a> Iterator for RangeListIterator<'a> {
                         let high_addr = FileAddress::new(Rc::clone(&self.dwarf.elf), hi as usize);
 
                         return Some(RangeListEntry { low: low_addr, high: high_addr });
-                    },
+                    }
                     Some(ref base_addr) => {
                         let low_addr = base_addr.clone() + low as isize;
                         let high_addr = base_addr.clone() + hi as isize;
                         return Some(RangeListEntry {
                             low: low_addr,
                             high: high_addr,
-                        })
+                        });
                     }
                 }
             }
@@ -531,7 +540,7 @@ pub struct Attribute {
     pub attr_form: DwarfForm,
 
     // offset of this attribute value within the .debug_info section
-    attr_location: usize
+    attr_location: usize,
 }
 
 impl Attribute {
@@ -548,7 +557,7 @@ impl Attribute {
                 let addr = cursor.u64();
                 let file_addr = FileAddress::new(dwarf.elf.clone(), addr as usize);
                 Ok(file_addr)
-            },
+            }
             _ => Err(Error::from_message(String::from("Invalid address type")))
         }
     }
@@ -559,7 +568,7 @@ impl Attribute {
                 let mut cursor = self.data_cursor(dwarf);
                 let offset = cursor.u32();
                 Ok(offset)
-            },
+            }
             _ => Err(Error::from_message(String::from("Invalid offset type")))
         }
     }
@@ -615,7 +624,7 @@ impl Attribute {
                 let die_entry = compile_unit.parse_die_entry(&mut cursor, dwarf);
 
                 return Ok(die_entry);
-            },
+            }
             other => return Err(Error::from_message(format!("Invalid reference type: {:#?}", other)))
         };
 
@@ -638,7 +647,7 @@ impl Attribute {
             DwarfForm::DW_FORM_string => {
                 let s = cursor.string();
                 Ok(s)
-            },
+            }
             DwarfForm::DW_FORM_strp => {
                 let offset = cursor.u32() as usize;
                 let str_table = dwarf.debug_str_data();
@@ -646,7 +655,7 @@ impl Attribute {
                 cursor.set_position(offset);
                 let s = cursor.string();
                 Ok(s)
-            },
+            }
             other => Err(Error::from_message(format!("Invalid string type {:#?}", other)))
         }
     }
@@ -660,7 +669,7 @@ impl Attribute {
         let cu_low_addr = match root_die {
             DIEEntry::Entry(die) => {
                 die.low_pc(compile_unit, dwarf).ok()
-            },
+            }
             DIEEntry::Null(_) => None,
         };
 
@@ -694,7 +703,7 @@ pub struct DIE {
 
     // offsets of the attributes of this DIE within .debug_info
     // the attributes definition are stored within the corresponding index in the abbrev
-    attribute_locations: Vec<usize>
+    attribute_locations: Vec<usize>,
 }
 
 impl DIE {
@@ -739,7 +748,7 @@ impl DIE {
     }
 
     pub fn contains_address(&self, compile_unit: &CompileUnit, dwarf: &Dwarf, addr: &FileAddress) -> bool {
-        if ! Rc::ptr_eq(addr.elf_ptr(), &dwarf.elf) { return false; }
+        if !Rc::ptr_eq(addr.elf_ptr(), &dwarf.elf) { return false; }
 
         let abbrev = self.get_abbrev(dwarf);
 
@@ -770,7 +779,7 @@ impl DIE {
 
             // low address is low address of first entry (which is expected to exist)
             let low_addr = range_list.next().expect("Expected non-empty range list").low;
-            return Ok(low_addr)
+            return Ok(low_addr);
         }
 
         let attr = self.get_attribute(abbrev, DwarfAttribute::DW_AT_low_pc as u64)
@@ -786,7 +795,7 @@ impl DIE {
 
             // high address is high address of last entry (which should exist)
             let high_addr = range_list.last().expect("Expected non-empty range list").high;
-            return Ok(high_addr)
+            return Ok(high_addr);
         }
 
         let attr = self.get_attribute(abbrev, DwarfAttribute::DW_AT_high_pc as u64)
@@ -812,9 +821,9 @@ impl DIE {
                 let attr = Attribute {
                     attr_type: attr_spec.attribute,
                     attr_form: attr_spec.form,
-                    attr_location: self.attribute_locations[attr_index]
+                    attr_location: self.attribute_locations[attr_index],
                 };
-                return Some(attr)
+                return Some(attr);
             }
         }
 
@@ -830,7 +839,7 @@ impl DIE {
 #[derive(Clone, Debug)]
 pub enum DIEEntry {
     Null(usize),
-    Entry(DIE)
+    Entry(DIE),
 }
 
 impl DIEEntry {
@@ -876,7 +885,11 @@ impl CompileUnitHeader {
         }
 
         let header = Self {
-            offset, size, version, abbrev_offset, address_size
+            offset,
+            size,
+            version,
+            abbrev_offset,
+            address_size,
         };
         Ok(header)
     }
@@ -903,9 +916,13 @@ impl CompileUnitHeader {
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct CompileUnitId(usize);
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct CompileUnit {
     header: CompileUnitHeader,
+
+    // NOTE: book defines line_table_ field
+    // these are stored within the parent Dwarf instance to simplify the initial construction
+    // logic
 }
 
 impl CompileUnit {
@@ -931,7 +948,7 @@ impl CompileUnit {
                 // null DIE
                 // next DIE is at current cursor position
                 DIEEntry::Null(cursor.position)
-            },
+            }
             Some(abbrev_code) => {
                 // get abbreviation table for compile unit
                 // and lookup abbrev by code
@@ -981,7 +998,7 @@ pub struct DIEChildIterator<'a> {
     state: ChildIteratorState,
 }
 
-impl <'a> DIEChildIterator<'a> {
+impl<'a> DIEChildIterator<'a> {
     fn next_position(&self) -> usize {
         match &self.state {
             ChildIteratorState::Parent(parent) => parent.next,
@@ -1013,7 +1030,7 @@ impl <'a> DIEChildIterator<'a> {
             DIEEntry::Null(next_pos) => {
                 self.state = ChildIteratorState::Finished(next_pos);
                 None
-            },
+            }
             DIEEntry::Entry(die) => {
                 self.state = ChildIteratorState::Sibling(die.clone());
                 Some(die)
@@ -1022,7 +1039,7 @@ impl <'a> DIEChildIterator<'a> {
     }
 }
 
-impl <'a> Iterator for DIEChildIterator<'a> {
+impl<'a> Iterator for DIEChildIterator<'a> {
     type Item = DIE;
     fn next(&mut self) -> Option<Self::Item> {
         match &self.state {
@@ -1037,7 +1054,7 @@ impl <'a> Iterator for DIEChildIterator<'a> {
                     self.state = ChildIteratorState::Finished(parent.next);
                     None
                 }
-            },
+            }
             ChildIteratorState::Sibling(sibling) => {
                 // current is a child of the original parent DIE
                 // if it can have children we need to find the next sibling
@@ -1052,12 +1069,12 @@ impl <'a> Iterator for DIEChildIterator<'a> {
                             let cu = self.dwarf.get_compile_unit(self.compile_unit_id);
                             let sibling_entry = sibling_attr.as_reference(cu, &self.dwarf).expect("Failed to read referenced sibling DIE");
                             self.update_state(sibling_entry)
-                        },
+                        }
                         None => {
                             // iterate children of current node to find next sibling
                             let mut it = DIEChildIterator::from_parent(sibling.clone(), self.dwarf);
 
-                            while let Some(_) = it.next() { }
+                            while let Some(_) = it.next() {}
 
                             // read next DIE after sibling's children
                             let sibling_entry = self.read_entry_at(it.next_position());
@@ -1069,7 +1086,7 @@ impl <'a> Iterator for DIEChildIterator<'a> {
                     let sibling_entry = self.read_entry_at(sibling.next);
                     self.update_state(sibling_entry)
                 }
-            },
+            }
             ChildIteratorState::Finished(_) => {
                 None
             }
@@ -1095,6 +1112,9 @@ pub struct Dwarf {
     abbrev_tables: HashMap<usize, AbbrevTable>,
 
     function_index: UnorderedMultiMap<String, DIEIndexEntry>,
+
+    // NOTE: book stores each line table within the compile unit
+    line_tables: HashMap<CompileUnitId, LineTable>,
 }
 
 impl Dwarf {
@@ -1106,11 +1126,18 @@ impl Dwarf {
             elf,
             compile_units,
             abbrev_tables,
+
+            // NOTE: hack! set to their real values immediately after construction
+            // TODO: refactor so they can be set once
             function_index: UnorderedMultiMap::new(),
+            line_tables: HashMap::new(),
         };
 
         let function_index = dwarf.build_function_index();
         dwarf.function_index = function_index;
+
+        let line_tables = dwarf.parse_line_tables();
+        dwarf.line_tables = line_tables;
 
         Ok(dwarf)
     }
@@ -1177,6 +1204,10 @@ impl Dwarf {
 
     fn get_compile_unit(&self, id: CompileUnitId) -> &CompileUnit {
         self.compile_units.get(&id).expect("Unknown compile unit")
+    }
+
+    fn get_compile_unit_line_table(&self, id: CompileUnitId) -> Option<&LineTable> {
+        self.line_tables.get(&id)
     }
 
     pub fn function_containing_address(&self, addr: &FileAddress) -> Option<DIE> {
@@ -1251,6 +1282,159 @@ impl Dwarf {
         self.abbrev_tables.get(&offset).expect("No abbrev table at offset")
     }
 
+    const EXPECTED_OPCODE_LENGTHS: [u8; 12] = [
+        0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1
+    ];
+
+    fn parse_line_tables(&self) -> HashMap<CompileUnitId, LineTable> {
+        let mut line_tables = HashMap::new();
+
+        for cu in self.get_compile_units() {
+            if let Ok(Some(line_table)) = Self::parse_line_table(cu.id(), self) {
+                line_tables.insert(cu.id(), line_table);
+            }
+        }
+
+        line_tables
+    }
+
+    // TODO: move into line_table module?
+    fn parse_line_table(compile_unit_id: CompileUnitId, dwarf: &Dwarf) -> Result<Option<LineTable>, Error> {
+        let section = dwarf.debug_line_data();
+        let compile_unit = dwarf.get_compile_unit(compile_unit_id);
+        match compile_unit.get_root(dwarf) {
+            DIEEntry::Entry(root) => {
+                let abbrev = root.get_abbrev(dwarf);
+                let stmt_list_attr = root.get_attribute(abbrev, DwarfAttribute::DW_AT_stmt_list as u64)
+                    .ok_or_else(|| Error::from_message("Expected DW_AT_stmt_list attribute on compile unit root DIE".to_owned()))?;
+                let offset = stmt_list_attr.as_section_offset(dwarf)?;
+
+                let mut cursor = Cursor::new(section);
+                cursor.set_position(offset as usize);
+
+                let size = cursor.u32();
+                let end = cursor.position + size as usize;
+
+                let version = cursor.u16();
+                // NOTE: from book - older versions of GCC output DWARF 3 line table info even when
+                // outputting DWARF 4
+                // skip version check for 4 and also need to skip over the maximum_operations_per_instruction field below
+                //assert_eq!(4, version, "Only DWARF 4 is supported");
+
+                let header_length = cursor.u32();
+
+                let minimum_instruction_length = cursor.u8();
+                assert_eq!(1, minimum_instruction_length, "Invalid minimum instruction length");
+
+                //let max_operations_per_instruction = cursor.u8();
+                //assert_eq!(1, max_operations_per_instruction, "Invalid maximum number of operations per instruction");
+
+                let default_is_statement = cursor.u8();
+                let line_base = cursor.i8();
+                let line_range = cursor.u8();
+                let opcode_base = cursor.u8();
+
+                for i in 0..opcode_base - 1 {
+                    let opcode_length = cursor.u8();
+                    let expected_length = Self::EXPECTED_OPCODE_LENGTHS[i as usize];
+                    if opcode_length != expected_length {
+                        return Err(Error::from_message(format!("Unexpected length for opcode {}: Expected {} got {}", i, expected_length, opcode_length)));
+                    }
+                }
+
+                let mut include_directories = Vec::new();
+                match root.get_attribute(abbrev, DwarfAttribute::DW_AT_comp_dir as u64) {
+                    None => {
+                        // TODO: can provide a default root path ('/'?) if attribute not present?
+                        return Ok(None)
+                    }
+                    Some(compilation_dir_attr) => {
+                        let compilation_dir = {
+                            let dir_str = compilation_dir_attr.as_string(dwarf)?;
+                            PathBuf::from(dir_str)
+                        };
+
+                        // keep reading strings from the cursor until an empty string is found
+                        loop {
+                            let dir = cursor.string();
+                            if dir.is_empty() {
+                                break;
+                            }
+
+                            let c = dir.chars().next().expect("Expected first char for non-empty string");
+
+                            // NOTE: Path::join already handles the relative/absolute behaviour being done manually here
+                            let include_dir = if c == '/' {
+                                // absolute path
+                                PathBuf::from(dir)
+                            } else {
+                                // path is relative to the compilation directory
+                                Path::join(compilation_dir.as_path(), dir)
+                            };
+
+                            include_directories.push(include_dir);
+                        }
+
+                        // keep parsing filename entries while the current byte under the cursor is non-zero
+                        let mut file_names = Vec::new();
+                        while cursor.peek() != 0 {
+                            let table_file = Self::parse_line_table_file(&mut cursor, compilation_dir.as_path(), include_directories.as_slice());
+                            file_names.push(table_file);
+
+                        }
+
+                        // skip over terminating 0 byte
+                        cursor += 1;
+
+                        // cursor should now be at the start of the compile unit line table program
+                        let program_span = cursor.position..end;
+                        let table = LineTable::new(
+                            compile_unit_id,
+                            program_span,
+                            default_is_statement != 0,
+                            line_base,
+                            line_range,
+                            opcode_base,
+                            include_directories,
+                            file_names
+                        );
+
+                        Ok(Some(table))
+                    }
+                }
+
+            },
+            DIEEntry::Null(_) => {
+                Ok(None)
+            }
+        }
+    }
+
+    fn parse_line_table_file(cursor: &mut Cursor, compilation_dir: &Path, include_directories: &[PathBuf]) -> SourceFile {
+        let file_name = cursor.string();
+        let dir_index = cursor.uleb128();
+        let modification_time = cursor.uleb128();
+        let file_length = cursor.uleb128();
+
+        let path = match file_name.chars().next() {
+            Some('/') => {
+                // absolute path
+                PathBuf::from(file_name)
+            },
+            _ => {
+                // relative path
+                if dir_index == 0 {
+                    Path::join(compilation_dir, file_name)
+                } else {
+                    Path::join(include_directories[dir_index as usize - 1].as_path(), file_name)
+                }
+            }
+        };
+
+        SourceFile::new(path, modification_time, file_length)
+    }
+
+
     fn parse_compile_unit(cursor: &mut Cursor) -> Result<CompileUnit, Error> {
         let pos = cursor.position;
         let header = CompileUnitHeader::parse(cursor)?;
@@ -1283,6 +1467,10 @@ impl Dwarf {
 
     fn debug_ranges_data(&self) -> &[u8] {
         self.expected_section_data(".debug_ranges")
+    }
+
+    fn debug_line_data(&self) -> &[u8] {
+        self.expected_section_data(".debug_line")
     }
 
     fn debug_info_cursor(&self) -> Cursor {
@@ -1384,7 +1572,7 @@ mod test {
         let mut range_list = RangeListIterator {
             dwarf: &dwarf,
             cursor,
-            base_address: None
+            base_address: None,
         };
 
         let e1 = range_list.next().expect("Expected range list entry");
@@ -1392,7 +1580,7 @@ mod test {
         assert_eq!(0x12341236, e1.high.addr(), "Unexpected high address");
         assert!(e1.contains(&FileAddress::new(Rc::clone(&dwarf.elf), 0x12341234)), "Expected entry to contain address");
         assert!(e1.contains(&FileAddress::new(Rc::clone(&dwarf.elf), 0x12341235)), "Expected entry to contain address");
-        assert!(! e1.contains(&FileAddress::new(Rc::clone(&dwarf.elf), 0x12341236)), "Expected entry to not contain address");
+        assert!(!e1.contains(&FileAddress::new(Rc::clone(&dwarf.elf), 0x12341236)), "Expected entry to not contain address");
 
         // next entry should be offset by 0x32
         let e2 = range_list.next().expect("Expected range list entry");
@@ -1400,7 +1588,7 @@ mod test {
         assert_eq!(0x12341268, e2.high.addr(), "Unexpected high address");
         assert!(e2.contains(&FileAddress::new(Rc::clone(&dwarf.elf), 0x12341266)), "Expected entry to contain address");
         assert!(e2.contains(&FileAddress::new(Rc::clone(&dwarf.elf), 0x12341267)), "Expected entry to contain address");
-        assert!(! e2.contains(&FileAddress::new(Rc::clone(&dwarf.elf), 0x12341268)), "Expected entry to not contain address");
+        assert!(!e2.contains(&FileAddress::new(Rc::clone(&dwarf.elf), 0x12341268)), "Expected entry to not contain address");
 
         assert!(range_list.next().is_none(), "Expected end of range list");
 
