@@ -1512,6 +1512,22 @@ mod test {
 
         // NOTE: differs from book
         assert_eq!(DwarfLang::DW_LANG_C99 as u64, lang, "Unexpected lang");
+        
+        let table = dwarf.get_compile_unit_line_table(compile_unit.id()).expect("Expected line table for compile unit");
+        let debug_line_data = dwarf.debug_line_data();
+        let mut instructions = line_table::LineTableInstructionIterator::for_table(&table, debug_line_data);
+        
+        while let Some(instr_result) = instructions.next() {
+            match instr_result {
+                Ok(instruction) => {
+                    println!("{:?}", instruction)
+                },
+                Err(e) => {
+                    eprintln!("Error parsing instruction: {:?}", e)
+                }
+            }
+        }
+        
         Ok(())
     }
 
