@@ -1515,15 +1515,16 @@ mod test {
         
         let table = dwarf.get_compile_unit_line_table(compile_unit.id()).expect("Expected line table for compile unit");
         let debug_line_data = dwarf.debug_line_data();
-        let mut instructions = line_table::LineTableInstructionIterator::for_table(&table, debug_line_data);
+        let mut entries = table.entries(debug_line_data);
+        //let mut instructions = line_table::LineTableInstructionIterator::for_table(&table, debug_line_data);
         
-        while let Some(instr_result) = instructions.next() {
+        while let Some(instr_result) = entries.next() {
             match instr_result {
                 Ok(instruction) => {
                     println!("{:?}", instruction)
                 },
                 Err(e) => {
-                    eprintln!("Error parsing instruction: {:?}", e)
+                    eprintln!("Error parsing entry: {:?}", e)
                 }
             }
         }

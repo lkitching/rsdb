@@ -1,9 +1,8 @@
 use std::path::PathBuf;
 use std::ops::Range;
-
+use std::mem;
 use strum_macros::FromRepr;
 
-use crate::types::FileAddress;
 use super::{CompileUnitId, Cursor};
 
 // NOTE: renamed from 'File' in book
@@ -62,11 +61,22 @@ impl LineTable {
             file_names,
         }
     }
+
+    pub fn entries<'a, 'b>(&'a self, debug_line_data: &'b [u8]) -> LineTableIterator<LineTableInstructionIterator<'b>> {
+        let instr_iterator = LineTableInstructionIterator::for_table(self, debug_line_data);
+        LineTableIterator {
+            inner: instr_iterator,
+            registers: LineTableEntry::default(),
+            table_default_is_statement: self.default_is_statement
+        }
+    }
 }
 
-#[derive(Debug)]
-struct LineTableEntry {
-    address: Option<FileAddress>,
+#[derive(Clone, Debug)]
+pub struct LineTableEntry {
+    // NOTE: book uses FileAddress here which is awkward due to Elf ownership
+    // we just store the raw address and resolve the file reference elsewhere
+    address: usize,
     file_index: u64,
     line: u64,
     column: u64,
@@ -78,7 +88,21 @@ struct LineTableEntry {
     discriminator: u64,
 
     // should be index into LineTable::file_names?
-    file_entry: Option<SourceFile>,
+    //file_entry: Option<SourceFile>,
+}
+
+impl LineTableEntry {
+    fn update_line(&mut self, offset: i64) {
+        if (offset < 0) {
+            self.line -= offset.abs() as u64;
+        } else {
+            self.line += offset as u64;
+        }
+    }
+
+    fn get_file_entry<'a, 'b>(&'a self, table: &'b LineTable) -> &'b SourceFile {
+        &table.file_names[self.file_index as usize - 1]
+    }
 }
 
 impl Eq for LineTableEntry {}
@@ -96,7 +120,7 @@ impl PartialEq for LineTableEntry {
 impl Default for LineTableEntry {
     fn default() -> Self {
         Self {
-            address: None,
+            address: 0,
             file_index: 1,
             line: 1,
             column: 0,
@@ -106,7 +130,7 @@ impl Default for LineTableEntry {
             prologue_end: false,
             epilogue_begin: false,
             discriminator: 0,
-            file_entry: None,
+            //file_entry: None,
         }
     }
 }
@@ -187,6 +211,10 @@ struct InstructionParser {
 #[derive(Clone, Debug)]
 pub enum LineTableExecutionError {
     InvalidOpcode(u8),
+
+    // indicates the stream of instructions ended before the current
+    // entry could be emitted
+    PartialEntry(Instruction),
 }
 
 impl InstructionParser {
@@ -308,5 +336,143 @@ impl <'a> LineTableInstructionIterator<'a> {
         };
 
         Self { parser, cursor }
+    }
+}
+
+pub struct LineTableIterator<I> {
+    inner: I,
+    registers: LineTableEntry,
+
+    // value of default_is_statement from the parent table
+    table_default_is_statement: bool,
+}
+
+enum EvaluationAction {
+    Continue,
+    Emit(LineTableEntry),
+}
+
+impl <I> LineTableIterator<I> {
+    fn execute(&mut self, instruction: &Instruction) -> EvaluationAction {
+        match instruction {
+            Instruction::Standard(standard_instruction) => {
+                match standard_instruction {
+                    StandardInstruction::Copy => {
+                        let entry = self.registers.clone();
+                        self.registers.basic_block_start = false;
+                        self.registers.prologue_end = false;
+                        self.registers.epilogue_begin = false;
+                        self.registers.discriminator = 0;
+                        return EvaluationAction::Emit(entry);
+                    },
+                    StandardInstruction::AdvancePC(offset) => {
+                        self.registers.address += *offset as usize;
+                    },
+                    StandardInstruction::AdvanceLine(offset) => {
+                        self.registers.update_line(*offset);
+                    },
+                    StandardInstruction::SetFile(file_index) => {
+                        self.registers.file_index = *file_index;
+                    },
+                    StandardInstruction::SetColumn(column) => {
+                        self.registers.column = *column;
+                    },
+                    StandardInstruction::NegateStatement => {
+                        self.registers.is_statement = !self.registers.is_statement;
+                    },
+                    StandardInstruction::SetBasicBlock => {
+                        self.registers.basic_block_start = true;
+                    },
+                    StandardInstruction::FixedAdvancePC(incr) => {
+                        self.registers.address += *incr as usize
+                    },
+                    StandardInstruction::SetPrologueEnd => {
+                        self.registers.prologue_end = true;
+                    },
+                    StandardInstruction::SetEpilogueBegin => {
+                        self.registers.epilogue_begin = true;
+                    },
+                    StandardInstruction::SetISA(_) => {
+                        // NOTE: ISA register is ignored
+                    }
+                }
+                EvaluationAction::Continue
+            },
+            Instruction::Extended(extended_instruction) => {
+                match extended_instruction {
+                    ExtendedInstruction::EndSequence => {
+                        self.registers.end_sequence = true;
+                        let entry = mem::take(&mut self.registers);
+                        self.registers.is_statement = self.table_default_is_statement;
+                        EvaluationAction::Emit(entry)
+                    },
+                    ExtendedInstruction::SetAddress(addr) => {
+                        self.registers.address = *addr as usize;
+                        EvaluationAction::Continue
+                    },
+                    ExtendedInstruction::DefineFile(source_file) => {
+                        todo!()
+                    },
+                    ExtendedInstruction::SetDiscriminator(disc) => {
+                        self.registers.discriminator = *disc;
+                        EvaluationAction::Continue
+                    }
+                }
+            },
+            Instruction::Special(special_instruction) => {
+                self.registers.address += special_instruction.address_advance as usize;
+                self.registers.update_line(special_instruction.line_advance as i64);
+
+                let entry = self.registers.clone();
+
+                self.registers.basic_block_start = false;
+                self.registers.prologue_end = false;
+                self.registers.epilogue_begin = false;
+                self.registers.discriminator = 0;
+
+                EvaluationAction::Emit(entry)
+            }
+        }
+    }
+}
+
+impl <I> Iterator for LineTableIterator<I> where I: Iterator<Item=Result<Instruction, LineTableExecutionError>> {
+    type Item = Result<LineTableEntry, LineTableExecutionError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut current_instruction = self.inner.next()?;
+
+        // at least one instruction remaining, keep evaluating until an entry is emitted
+        // NOTE: an error if the instruction stream ends before an entry is emitted
+        loop {
+            match current_instruction {
+                Ok(instruction) => {
+                    // execute current instruction
+                    let action = self.execute(&instruction);
+                    match action {
+                        EvaluationAction::Continue => {
+                            // read next instruction and continue evaluating
+                            match self.inner.next() {
+                                None => {
+                                    // no next instruction
+                                    // invalid instruction stream
+                                    return Some(Err(LineTableExecutionError::PartialEntry(instruction)));
+                                },
+                                Some(instruction_result) => {
+                                    current_instruction = instruction_result;
+                                }
+                            }
+                        },
+                        EvaluationAction::Emit(entry) => {
+                            // resolve file entry
+                            return Some(Ok(entry));
+                        }
+                    }
+                },
+                Err(e) => {
+                    return Some(Err(e));
+                }
+            }
+        }
     }
 }
