@@ -1,9 +1,46 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::ops::Range;
 use std::mem;
 use strum_macros::FromRepr;
 
 use super::{CompileUnitId, Cursor};
+
+#[derive(Clone, Debug)]
+pub struct SourceFileInfo {
+    file_name: String,
+    dir_index: u64,
+    modification_time: u64,
+    file_length: u64,
+}
+
+impl SourceFileInfo {
+    pub fn read(cursor: &mut Cursor) -> Self {
+        let file_name = cursor.string();
+        let dir_index = cursor.uleb128();
+        let modification_time = cursor.uleb128();
+        let file_length = cursor.uleb128();
+        Self { file_name, dir_index, modification_time, file_length }
+    }
+
+    pub fn resolve_source_file(self, compilation_dir: &Path, include_directories: &[PathBuf]) -> SourceFile {
+        let path = match self.file_name.chars().next() {
+            Some('/') => {
+                // absolute path
+                PathBuf::from(self.file_name)
+            },
+            _ => {
+                // relative path
+                if self.dir_index == 0 {
+                    Path::join(compilation_dir, self.file_name)
+                } else {
+                    Path::join(include_directories[self.dir_index as usize - 1].as_path(), self.file_name)
+                }
+            }
+        };
+
+        SourceFile::new(path, self.modification_time, self.file_length)
+    }
+}
 
 // NOTE: renamed from 'File' in book
 #[derive(Clone, Debug)]
@@ -184,7 +221,7 @@ pub enum StandardInstruction {
 pub enum ExtendedInstruction {
     EndSequence,
     SetAddress(u64),
-    DefineFile(SourceFile),
+    DefineFile(SourceFileInfo),
     SetDiscriminator(u64),
 }
 
@@ -247,7 +284,8 @@ impl InstructionParser {
                     ExtendedInstruction::SetAddress(addr)
                 },
                 DwarfExtendedOpcode::DW_LNE_define_file => {
-                    unimplemented!();
+                    let file_info = SourceFileInfo::read(cursor);
+                    ExtendedInstruction::DefineFile(file_info)
                 },
                 DwarfExtendedOpcode::DW_LNE_set_discriminator => {
                     let discriminator = cursor.uleb128();
@@ -411,6 +449,9 @@ impl <I> LineTableIterator<I> {
                         EvaluationAction::Continue
                     },
                     ExtendedInstruction::DefineFile(source_file) => {
+                        // need to append source file definition to parent table
+                        // emit a 'define file' action?
+                        // borrow the parent table/dwarf and mutate directly?
                         todo!()
                     },
                     ExtendedInstruction::SetDiscriminator(disc) => {

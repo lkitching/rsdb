@@ -14,7 +14,7 @@ use crate::types::{FileAddress, TryFromBytes};
 use crate::error::Error;
 use crate::multimap::UnorderedMultiMap;
 use line_table::{LineTable};
-use crate::dwarf::line_table::SourceFile;
+use crate::dwarf::line_table::{SourceFile, SourceFileInfo};
 
 #[allow(non_camel_case_types)]
 #[repr(u64)]
@@ -1411,27 +1411,8 @@ impl Dwarf {
     }
 
     fn parse_line_table_file(cursor: &mut Cursor, compilation_dir: &Path, include_directories: &[PathBuf]) -> SourceFile {
-        let file_name = cursor.string();
-        let dir_index = cursor.uleb128();
-        let modification_time = cursor.uleb128();
-        let file_length = cursor.uleb128();
-
-        let path = match file_name.chars().next() {
-            Some('/') => {
-                // absolute path
-                PathBuf::from(file_name)
-            },
-            _ => {
-                // relative path
-                if dir_index == 0 {
-                    Path::join(compilation_dir, file_name)
-                } else {
-                    Path::join(include_directories[dir_index as usize - 1].as_path(), file_name)
-                }
-            }
-        };
-
-        SourceFile::new(path, modification_time, file_length)
+        let file_info = SourceFileInfo::read(cursor);
+        file_info.resolve_source_file(compilation_dir, include_directories)
     }
 
 
