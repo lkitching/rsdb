@@ -271,6 +271,7 @@ impl AbbrevTable {
     }
 }
 
+#[derive(Clone, Debug)]
 struct Cursor<'a> {
     data: &'a [u8],
     position: usize,

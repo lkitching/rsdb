@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::ops::Range;
 use std::mem;
 use strum_macros::FromRepr;
-
+use crate::types::FileAddress;
 use super::{CompileUnitId, Cursor};
 
 #[derive(Clone, Debug)]
@@ -106,6 +106,32 @@ impl LineTable {
             registers: LineTableEntry::default(),
             table_default_is_statement: self.default_is_statement
         }
+    }
+
+    pub fn get_entry_by_address<'a, 'b>(&'a self, debug_line_data: &'b [u8], address: &FileAddress) -> LineTableIterator<LineTableInstructionIterator<'b>> {
+        let mut entries = self.entries(debug_line_data);
+        let mut prev = entries.clone();
+        let mut prev_entry: Option<LineTableEntry> = None;
+
+        while let Some(entry_result) = entries.next() {
+            match entry_result {
+                Ok(entry) => {
+                    if let Some(ref pe) = prev_entry {
+                        if (pe.address <= address.addr()) {
+                            if (entry.address > address.addr() && !entry.end_sequence) {
+                                return prev;
+                            }
+                        }
+                    }
+
+                    // keep searching
+                    prev_entry = Some(entry);
+                    prev = entries.clone();
+                },
+                Err(_) => break
+            }
+        }
+        prev
     }
 }
 
@@ -238,6 +264,7 @@ pub enum Instruction {
     Special(SpecialInstruction),
 }
 
+#[derive(Clone, Debug)]
 struct InstructionParser {
     // TODO: use &'a Table instead?
     opcode_base: u8,
@@ -345,6 +372,7 @@ impl InstructionParser {
     }
 }
 
+#[derive(Clone)]
 pub struct LineTableInstructionIterator<'a> {
     parser: InstructionParser,
     cursor: Cursor<'a>,
@@ -377,6 +405,7 @@ impl <'a> LineTableInstructionIterator<'a> {
     }
 }
 
+#[derive(Clone)]
 pub struct LineTableIterator<I> {
     inner: I,
     registers: LineTableEntry,
