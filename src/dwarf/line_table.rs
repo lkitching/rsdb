@@ -60,6 +60,18 @@ impl SourceFile {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct SourceLocation {
+    source_file: SourceFile,
+    line: u64,
+}
+
+impl SourceLocation {
+    pub fn new(source_file: SourceFile, line: u64) -> Self {
+        Self { source_file, line }
+    }
+}
+
 #[derive(Debug)]
 pub struct LineTable {
     compile_unit_id: CompileUnitId,
@@ -133,6 +145,8 @@ impl LineTable {
         }
         prev
     }
+
+    pub fn file_names(&self) -> &[SourceFile] { &self.file_names }
 }
 
 #[derive(Clone, Debug)]

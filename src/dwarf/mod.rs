@@ -14,7 +14,7 @@ use crate::types::{FileAddress, TryFromBytes};
 use crate::error::Error;
 use crate::multimap::UnorderedMultiMap;
 use line_table::{LineTable};
-use crate::dwarf::line_table::{SourceFile, SourceFileInfo};
+use crate::dwarf::line_table::{LineTableInstructionIterator, SourceFile, SourceFileInfo, SourceLocation};
 
 #[allow(non_camel_case_types)]
 #[repr(u64)]
@@ -832,6 +832,43 @@ impl DIE {
         None
     }
 
+    pub fn get_location(&self, dwarf: &Dwarf) -> SourceLocation {
+        SourceLocation::new(
+            self.get_source_file(dwarf),
+            self.get_source_line(dwarf),
+        )
+    }
+
+    fn get_source_file(&self, dwarf: &Dwarf) -> SourceFile {
+        let abbrev = self.get_abbrev(dwarf);
+        let attr_name = if abbrev.tag == DwarfTag::DW_TAG_inlined_subroutine as u64 {
+            DwarfAttribute::DW_AT_call_file
+        } else {
+            DwarfAttribute::DW_AT_decl_file
+        };
+        let attr = self.expect_attribute(abbrev, attr_name);
+        let file_index = attr.as_int(dwarf).expect("expected int attribute") as usize;
+        let lines = dwarf.get_compile_unit_line_table(self.compile_unit_id)
+            .expect("Expected compile unit line table");
+        lines.file_names()[file_index - 1].clone()
+    }
+
+    fn expect_attribute(&self, abbrev: &Abbrev, attr_name: DwarfAttribute) -> Attribute {
+        self.get_attribute(abbrev, attr_name as u64)
+            .expect(format!("Expected {:?} attribute", attr_name).as_str())
+    }
+
+    fn get_source_line(&self, dwarf: &Dwarf) -> u64 {
+        let abbrev = self.get_abbrev(dwarf);
+        let attr_name = if abbrev.tag == DwarfTag::DW_TAG_inlined_subroutine as u64 {
+            DwarfAttribute::DW_AT_call_line
+        } else {
+            DwarfAttribute::DW_AT_decl_line
+        };
+        let attr = self.expect_attribute(abbrev, attr_name);
+        attr.as_int(dwarf).expect("Expected int attribute value")
+    }
+
     pub fn children<'a>(&self, dwarf: &'a Dwarf) -> DIEChildIterator<'a> {
         DIEChildIterator::from_parent(self.clone(), dwarf)
     }
@@ -1409,6 +1446,14 @@ impl Dwarf {
                 Ok(None)
             }
         }
+    }
+
+    fn line_entry_at_address(&self, address: &FileAddress) -> Option<line_table::LineTableIterator<LineTableInstructionIterator>> {
+        let compile_unit = self.compile_unit_containing_address(address)?;
+        let lines = self.get_compile_unit_line_table(compile_unit.id())?;
+        let debug_line_data = self.debug_line_data();
+        let it = lines.get_entry_by_address(debug_line_data, address);
+        Some(it)
     }
 
     fn parse_line_table_file(cursor: &mut Cursor, compilation_dir: &Path, include_directories: &[PathBuf]) -> SourceFile {
