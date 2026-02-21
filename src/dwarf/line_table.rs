@@ -150,6 +150,26 @@ impl LineTable {
         prev
     }
 
+    pub fn get_entries_by_line<'a, 'b>(&'a self, debug_line_data: &'b [u8], path: &Path, line: u64) -> Vec<LineTableIterator<LineTableInstructionIterator<'b>>> {
+        let mut entries = Vec::new();
+        let mut it = self.entries(debug_line_data);
+        let mut prev = it.clone();
+
+        while let Some(entry_result) = it.next() {
+            if let Ok(entry) = entry_result {
+                if entry.line == line {
+                    let entry_path = self.get_file(&entry).path();
+                    if (path.is_absolute() && entry_path == path) || (path.is_relative() && entry_path.ends_with(path)) {
+                        entries.push(prev)
+                    }
+                }
+            }
+            prev = it.clone();
+        }
+
+        entries
+    }
+
     pub fn file_names(&self) -> &[SourceFile] { &self.file_names }
 
     pub fn get_file(&self, entry: &LineTableEntry) -> &SourceFile {
