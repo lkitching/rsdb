@@ -49,7 +49,7 @@ impl <K: Eq + Hash, V> UnorderedMultiMap<K, V> {
 
 impl <K, V> UnorderedMultiMap<K, V> {
     pub fn values(&self) -> impl Iterator<Item=&V> {
-        let values_it = self.items.iter().flat_map(|(k, v)| v.iter());
+        let values_it = self.items.iter().flat_map(|(_k, v)| v.iter());
         ValuesIterator { inner: Some(values_it) }
     }
 }

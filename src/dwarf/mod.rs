@@ -362,7 +362,7 @@ impl<'a> Cursor<'a> {
     fn sleb128(&mut self) -> i64 {
         let mut res = 0u64;
         let mut shift = 0;
-        let mut b = 0;
+        let mut b: u8;
 
         loop {
             b = self.u8();
@@ -461,7 +461,7 @@ impl<'a> Cursor<'a> {
             DW_FORM_ref8 | DW_FORM_ref_sig8 => {
                 // NOTE: not supported in the book!
                 panic!("DW_FORM_ref8 and DW_FORM_ref_sig8 forms not supported");
-                self.position += 8;
+                //self.position += 8;
             }
         }
     }
@@ -661,7 +661,7 @@ impl Attribute {
         }
     }
 
-    pub fn as_range_list<'a>(&self, compile_unit: &'a CompileUnit, abbrev: &'a Abbrev, dwarf: &'a Dwarf) -> Result<RangeListIterator<'a>, Error> {
+    pub fn as_range_list<'a>(&self, compile_unit: &'a CompileUnit, dwarf: &'a Dwarf) -> Result<RangeListIterator<'a>, Error> {
         let offset = self.as_section_offset(&dwarf)?;
 
         // get root DIE of compile unit for this attribute
@@ -755,7 +755,7 @@ impl DIE {
 
         // NOTE: this should go first since the high/low pc methods iterate the range list if one exists
         if let Some(range_attr) = self.get_attribute(abbrev, DwarfAttribute::DW_AT_ranges as u64) {
-            let mut range_list = range_attr.as_range_list(compile_unit, abbrev, dwarf).expect("Failed to get range list");
+            let mut range_list = range_attr.as_range_list(compile_unit, dwarf).expect("Failed to get range list");
             return range_list.any(|rl| rl.contains(addr));
         }
 
@@ -776,7 +776,7 @@ impl DIE {
         let abbrev = self.get_abbrev(dwarf);
 
         if let Some(range_attr) = self.get_attribute(abbrev, DwarfAttribute::DW_AT_ranges as u64) {
-            let mut range_list = range_attr.as_range_list(compile_unit, abbrev, dwarf).expect("Failed to get range list");
+            let mut range_list = range_attr.as_range_list(compile_unit, dwarf).expect("Failed to get range list");
 
             // low address is low address of first entry (which is expected to exist)
             let low_addr = range_list.next().expect("Expected non-empty range list").low;
@@ -792,7 +792,7 @@ impl DIE {
         let abbrev = self.get_abbrev(dwarf);
 
         if let Some(range_attr) = self.get_attribute(abbrev, DwarfAttribute::DW_AT_ranges as u64) {
-            let range_list = range_attr.as_range_list(compile_unit, abbrev, dwarf).expect("Failed to get range list");
+            let range_list = range_attr.as_range_list(compile_unit, dwarf).expect("Failed to get range list");
 
             // high address is high address of last entry (which should exist)
             let high_addr = range_list.last().expect("Expected non-empty range list").high;
@@ -1353,13 +1353,13 @@ impl Dwarf {
                 let size = cursor.u32();
                 let end = cursor.position + size as usize;
 
-                let version = cursor.u16();
+                let _version = cursor.u16();
                 // NOTE: from book - older versions of GCC output DWARF 3 line table info even when
                 // outputting DWARF 4
                 // skip version check for 4 and also need to skip over the maximum_operations_per_instruction field below
                 //assert_eq!(4, version, "Only DWARF 4 is supported");
 
-                let header_length = cursor.u32();
+                let _header_length = cursor.u32();
 
                 let minimum_instruction_length = cursor.u8();
                 assert_eq!(1, minimum_instruction_length, "Invalid minimum instruction length");
@@ -1448,7 +1448,7 @@ impl Dwarf {
         }
     }
 
-    fn line_entry_at_address(&self, address: &FileAddress) -> Option<line_table::LineTableIterator<LineTableInstructionIterator>> {
+    fn line_entry_at_address(&self, address: &FileAddress) -> Option<line_table::LineTableIterator<LineTableInstructionIterator<'_>>> {
         let compile_unit = self.compile_unit_containing_address(address)?;
         let lines = self.get_compile_unit_line_table(compile_unit.id())?;
         let debug_line_data = self.debug_line_data();
@@ -1500,7 +1500,7 @@ impl Dwarf {
         self.expected_section_data(".debug_line")
     }
 
-    fn debug_info_cursor(&self) -> Cursor {
+    fn debug_info_cursor(&self) -> Cursor<'_> {
         let data = self.debug_info_data();
         Cursor::new(data)
     }

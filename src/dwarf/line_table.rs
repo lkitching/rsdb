@@ -133,8 +133,8 @@ impl LineTable {
             match entry_result {
                 Ok(entry) => {
                     if let Some(ref pe) = prev_entry {
-                        if (pe.address <= address.addr()) {
-                            if (entry.address > address.addr() && !entry.end_sequence) {
+                        if pe.address <= address.addr() {
+                            if entry.address > address.addr() && !entry.end_sequence {
                                 return prev;
                             }
                         }
@@ -198,7 +198,7 @@ pub struct LineTableEntry {
 
 impl LineTableEntry {
     fn update_line(&mut self, offset: i64) {
-        if (offset < 0) {
+        if offset < 0 {
             self.line -= offset.abs() as u64;
         } else {
             self.line += offset as u64;
@@ -294,7 +294,7 @@ pub enum ExtendedInstruction {
 }
 
 #[derive(Copy, Clone, Debug)]
-struct SpecialInstruction {
+pub struct SpecialInstruction {
     address_advance: u8,
     line_advance: i8,
 }
@@ -530,7 +530,7 @@ impl <I> LineTableIterator<I> {
                         self.registers.address = *addr as usize;
                         EvaluationAction::Continue
                     },
-                    ExtendedInstruction::DefineFile(source_file) => {
+                    ExtendedInstruction::DefineFile(_source_file) => {
                         // need to append source file definition to parent table
                         // emit a 'define file' action?
                         // borrow the parent table/dwarf and mutate directly?

@@ -45,7 +45,7 @@ fn main() -> Result<(), DebuggerError> {
     // install signal handler for SIGINT
     unsafe {
         PID = Some(debugger.process().pid());
-        signal(SIGINT, handle_sigint as sighandler_t);
+        signal(SIGINT, handle_sigint as *const fn(c_int) as sighandler_t);
     }
     debugger.main_loop()
 }
