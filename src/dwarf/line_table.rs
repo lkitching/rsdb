@@ -1,6 +1,8 @@
+use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::ops::Range;
 use std::mem;
+use std::fmt;
 use strum_macros::FromRepr;
 use crate::types::FileAddress;
 use super::{CompileUnitId, Cursor};
@@ -58,6 +60,8 @@ impl SourceFile {
             file_length,
         }
     }
+
+    pub fn path(&self) -> &Path { self.path.as_path() }
 }
 
 #[derive(Clone, Debug)]
@@ -147,6 +151,10 @@ impl LineTable {
     }
 
     pub fn file_names(&self) -> &[SourceFile] { &self.file_names }
+
+    pub fn get_file(&self, entry: &LineTableEntry) -> &SourceFile {
+        &self.file_names[entry.file_index as usize - 1]
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -154,12 +162,12 @@ pub struct LineTableEntry {
     // NOTE: book uses FileAddress here which is awkward due to Elf ownership
     // we just store the raw address and resolve the file reference elsewhere
     address: usize,
-    file_index: u64,
-    line: u64,
+    pub file_index: u64,
+    pub line: u64,
     column: u64,
     is_statement: bool,
     basic_block_start: bool,
-    end_sequence: bool,
+    pub end_sequence: bool,
     prologue_end: bool,
     epilogue_begin: bool,
     discriminator: u64,
@@ -294,6 +302,17 @@ pub enum LineTableExecutionError {
     // entry could be emitted
     PartialEntry(Instruction),
 }
+
+impl fmt::Display for LineTableExecutionError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Self::InvalidOpcode(opcode) => write!(f, "invalid opcode {}", opcode),
+            Self::PartialEntry(instr) => write!(f, "partial instruction stream at {:?}", instr),
+        }
+    }
+}
+
+impl Error for LineTableExecutionError {}
 
 impl InstructionParser {
     fn special(&self, entry: u8) -> SpecialInstruction {

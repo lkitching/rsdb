@@ -1519,7 +1519,7 @@ mod test {
     use super::*;
 
     #[test]
-    fn dwarf_language_test() -> Result<(), Error> {
+    fn line_table_test() -> Result<(), Error> {
         let elf = Elf::open("target/debug/hello_rsdb")?;
         let dwarf = Dwarf::new(elf)?;
 
@@ -1543,18 +1543,31 @@ mod test {
         let table = dwarf.get_compile_unit_line_table(compile_unit.id()).expect("Expected line table for compile unit");
         let debug_line_data = dwarf.debug_line_data();
         let mut entries = table.entries(debug_line_data);
-        //let mut instructions = line_table::LineTableInstructionIterator::for_table(&table, debug_line_data);
-        
-        while let Some(instr_result) = entries.next() {
-            match instr_result {
-                Ok(instruction) => {
-                    println!("{:?}", instruction)
-                },
-                Err(e) => {
-                    eprintln!("Error parsing entry: {:?}", e)
-                }
-            }
+
+        {
+            let e = entries.next().expect("Expected line").expect("Error fetching line");
+
+            // NOTE: differs from book slightly
+            assert_eq!(3, e.line, "Unexpected line number");
+            assert_eq!("hello_rsdb.c", table.get_file(&e).path().file_name().expect("Expected file name"));
         }
+
+        {
+            let e = entries.next().expect("Expected line").expect("Error fetching line");
+            assert_eq!(4, e.line, "Unexpected line number");
+        }
+
+        {
+            let e = entries.next().expect("Expected line").expect("Error fetching line");
+            assert_eq!(5, e.line, "Unexpected line number");
+        }
+
+        {
+            let e = entries.next().expect("Expected line").expect("Error fetching line");
+            assert!(e.end_sequence, "Expected end sequence");
+        }
+
+        assert!(entries.next().is_none(), "Expected no more entries");
         
         Ok(())
     }
