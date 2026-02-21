@@ -7,7 +7,7 @@ target/debug/reg_read: src/support/reg_read.s
 	gcc -pie src/support/reg_read.s -o target/debug/reg_read
 
 target/debug/hello_rsdb: src/support/hello_rsdb.c
-	gcc -g -O0 -pie src/support/hello_rsdb.c -o target/debug/hello_rsdb
+	gcc -g -O0 -pie -gdwarf-4 src/support/hello_rsdb.c -o target/debug/hello_rsdb
 
 target/debug/multi_cu: src/support/multi_cu_main.cpp src/support/multi_cu_other.cpp
 	gcc -g -O0 -pie -gdwarf-4 src/support/multi_cu_main.cpp src/support/multi_cu_other.cpp -o target/debug/multi_cu
